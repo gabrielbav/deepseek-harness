@@ -257,6 +257,7 @@
       "@deepseek-ai/dsh-plugin-manager/diagnostic": ["./packages/boot/plugin-manager/src/diagnostic.ts"],
       "@deepseek-ai/dsh-plugin-manager/types": ["./packages/boot/plugin-manager/src/types.ts"],
       "@deepseek-ai/dsh-plugin-manager/registry": ["./packages/boot/plugin-manager/src/registry.ts"],
+      "@deepseek-ai/dsh-plugin-manager/install-gate": ["./packages/boot/plugin-manager/src/install-gate.ts"],
       "@deepseek-ai/dsh-plugin-manager/operations": ["./packages/boot/plugin-manager/src/operations.ts"],
       "@deepseek-ai/dsh-plugin-manager/tools": ["./packages/boot/plugin-manager/src/tools.ts"],
       "@deepseek-ai/dsh-mcp-client/types": ["./packages/mcp/mcp-client/src/types.ts"],

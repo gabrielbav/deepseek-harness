@@ -26,6 +26,10 @@
       "types": "./lib/types/registry.d.ts",
       "default": "./lib/types/registry.js"
     },
+    "./install-gate": {
+      "types": "./lib/types/install-gate.d.ts",
+      "default": "./lib/types/install-gate.js"
+    },
     "./typert": {
       "types": "./lib/typert.host.d.ts",
       "default": "./lib/typert.host.js"

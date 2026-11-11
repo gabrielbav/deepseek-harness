@@ -202,6 +202,16 @@ export class ApprovalService extends Service {
   }
 
   /**
+   * The policy an ask for this session resolves under right now: its override, else the configured default. A caller
+   * whose question only a person can answer checks for `'never'` to report that it was not asked rather than refused.
+   * @param session - the session asking.
+   * @returns `'ask'` or `'never'`.
+   */
+  policyOf(session: Session): ApprovalPolicy {
+    return this.effectivePolicy(session)
+  }
+
+  /**
    * Switch one live agent's policy and queue the transition for its next model
    * step. Session initialization uses {@link setApprovalPolicy} directly
    * because there is no previously visible policy to change.

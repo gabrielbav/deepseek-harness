@@ -62,6 +62,10 @@ const CODE_KEYS = {
   'unsupported-platform': 'reasonUnsupportedPlatform',
   'unexpected-package': 'reasonUnexpectedPackage',
   'operation-error': 'reasonOperationError',
+  'gate-blocked': 'reasonGateBlocked',
+  'gate-review': 'reasonGateReview',
+  'gate-mismatch': 'reasonGateMismatch',
+  'gate-missing': 'reasonGateMissing',
 } satisfies Record<ManagementError['code'], PluginManagerLocaleKey>
 
 /** The sentence a failed action opens with, by what was being done. */

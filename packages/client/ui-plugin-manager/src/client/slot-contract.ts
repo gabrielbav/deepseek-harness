@@ -19,7 +19,7 @@
  */
 
 import type {} from '@deepseek-ai/dsh-client-ui-slots'
-import type { BundleInfo } from '@deepseek-ai/dsh-api-remotes/client'
+import type { BundleInfo, InstallGateReport } from '@deepseek-ai/dsh-api-remotes/client'
 import type { ConfigForm, ConfigFormSnapshot } from '@deepseek-ai/dsh-client-ui-settings/client'
 
 /** The view the page asks a configuration entry for. */
@@ -123,6 +123,17 @@ export interface PluginTabProps {
   readonly openPackage: (packageName: string) => void
 }
 
+/**
+ * The install gate's report on the package the install dialog is installing. `outcome` is `review` while the
+ * installation waits for the person's acknowledgement, `blocked` when the gate refused it, and `installed` once it
+ * finished; `acknowledge` repeats the installation with this report acknowledged and is present only for `review`.
+ */
+export interface PluginInstallGateProps {
+  readonly report: InstallGateReport
+  readonly outcome: 'review' | 'blocked' | 'installed'
+  readonly acknowledge?: () => void
+}
+
 /** Add-plugin menu actions, independent of any selected bundle or Session. */
 export interface PluginAddActionsProps {
   /** Close the add-plugin menu before starting the contributed action. */
@@ -183,6 +194,12 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
      * has nothing for.
      */
     'plugins.detail.section': { kind: 'list'; scope: 'root'; owner: PluginDetailProps }
+    /**
+     * The install gates' report in the install dialog, rendered under the package card when the Host's answer
+     * carries a gate report. The page renders no report text of its own, so a `review` installation can
+     * proceed only through an entry's `acknowledge`.
+     */
+    'plugins.install.gate': { kind: 'list'; scope: 'root'; owner: PluginInstallGateProps }
   }
 }
 

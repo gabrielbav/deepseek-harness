@@ -8,6 +8,7 @@ import { approveEscalation } from '@deepseek-ai/dsh-sandbox'
 import type { ChangeResult, ManagementError, PluginEntryId, PluginInstallFailureKind, RestartReason } from './types.ts'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { getDshRuntimeVersion } from '@deepseek-ai/dsh-app-boot'
+import { gateApprovalText } from './gate-approval.ts'
 
 /** What the model does next for each refusal the manager reports. */
 const ERROR_STEPS: Record<ManagementError['code'], string> = {
@@ -26,6 +27,10 @@ const ERROR_STEPS: Record<ManagementError['code'], string> = {
   'unsupported-platform': 'This bundle cannot run on the current Host platform; ask the user to use a supported Host.',
   'unexpected-package': 'The source installed another package or version than requested and was rolled back; report this to the user.',
   'operation-error': 'Report the diagnostic to the user; retry only after its cause is addressed.',
+  'gate-blocked': 'An install check refused this package; tell the user it cannot be installed and do not retry.',
+  'gate-review': 'An install check needs the user\'s review; tell the user to install it from the Plugins page, where they can read the report and confirm.',
+  'gate-mismatch': 'The installed files differ from the copy the install checks examined and were rolled back; report this to the user and do not retry.',
+  'gate-missing': 'This profile requires an install check before installing, and none is running; tell the user to enable the plugin that provides it.',
 }
 
 /** What the model does next for each package-manager failure. */
@@ -47,6 +52,25 @@ const RESTART_STEPS: Record<RestartReason, string> = {
   'host-module': 'the change reaches modules DSH itself loaded',
   'unmanaged-plugin': 'the change reaches a plugin running outside the plugin list',
   'module-comparison': 'DSH could not compare loaded plugins with their files',
+}
+
+/**
+ * Reduce a gate report to its ruling: reasons and findings can quote the package or a tool, so they are untrusted and
+ * stay out of the model's context.
+ * @param result The manager's result.
+ * @returns The result with the level, score, gates and check statuses of its gate report only.
+ */
+function withoutFindings(result: ChangeResult): ChangeResult {
+  if (result.gateReport === undefined) return result
+  const { level, score, digest, spec, gates, checkedAt, metrics, omittedFindings, findings, checks, reasons } = result.gateReport
+  return {
+    ...result,
+    gateReport: {
+      level, ...score === undefined ? {} : { score }, digest, spec, gates, checkedAt, ...metrics === undefined ? {} : { metrics },
+      reasons: [], findings: [], omittedFindings: omittedFindings + findings.length + reasons.length,
+      ...checks === undefined ? {} : { checks: checks.map(({ id, status, findings: count }) => ({ id, status, findings: count })) },
+    },
+  }
 }
 
 /**
@@ -145,13 +169,53 @@ export function apply(ctx: Context): void {
             ? manager.setPluginEnabled(args.target as PluginEntryId, args.enabled)
             : manager.setBundleEnabled(args.target, args.enabled))))
         }
-        case 'install_bundle':
+        case 'install_bundle': {
           if (args.target === undefined) throw new Error('target package spec is required')
-          return JSON.stringify(withNextStep(await manager.installBundle(args.target, {
+          const options = {
             ...args.enabled === undefined ? {} : { enabled: args.enabled },
             ...args.approvedBuilds === undefined ? {} : { approvedBuilds: args.approvedBuilds },
             ...args.registry === undefined ? {} : { registry: args.registry },
-          })))
+          }
+          const result = await manager.installBundle(args.target, options)
+          const report = result.error?.code === 'gate-review' ? result.gateReport : undefined
+          const approver = ctx.get('approval')
+          if (report === undefined || approver === undefined || exec.agent === undefined) {
+            return JSON.stringify(withNextStep(withoutFindings(result)))
+          }
+          // A session that never asks (full access) cannot confirm a review, so the person is not asked and not refused.
+          if (approver.policyOf(exec.agent.session) === 'never') {
+            return JSON.stringify({
+              ...withoutFindings(result), gateReview: 'not-asked',
+              nextStep: 'This session never asks the user for approval, so the install-check review could not be confirmed here; nothing was installed. Tell the user to install it from the Plugins page, or to switch this session to a mode that asks for approval and ask again.',
+            })
+          }
+          // The person reads the findings in the conversation; the model and the session log receive only the ruling.
+          const outcome = await approver.request({
+            agent: exec.agent, toolName: 'plugin_manager', callId: exec.callId, signal: exec.signal,
+            reason: `install ${args.target} despite install-check review by ${report.gates.join(', ')}, digest ${report.digest}`,
+            ...gateApprovalText(report),
+          })
+          switch (outcome) {
+            case 'allowed-once':
+              return JSON.stringify({
+                ...withNextStep(withoutFindings(
+                  await manager.installBundle(args.target, { ...options, gateAcknowledged: report.digest }))),
+                gateReview: 'accepted-by-user',
+              })
+            case 'rejected':
+              return JSON.stringify({
+                ...withoutFindings(result), gateReview: 'declined-by-user',
+                nextStep: 'The user read the install-check report and declined the installation; nothing was installed. Do not retry.',
+              })
+            case 'cancelled':
+              exec.signal.throwIfAborted()
+              return JSON.stringify(withNextStep(withoutFindings(result)))
+            case 'unavailable':
+              return JSON.stringify(withNextStep(withoutFindings(result)))
+            /* v8 ignore next -- ApprovalOutcome is a closed union */
+            default: return assertNever(outcome)
+          }
+        }
         case 'remove_bundle':
           if (args.target === undefined) throw new Error('target bundle name is required')
           return JSON.stringify(withNextStep(await manager.removeBundle(args.target)))

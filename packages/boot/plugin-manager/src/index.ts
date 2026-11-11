@@ -39,6 +39,7 @@ import { approveBuilds, recordPendingBuilds } from './build-approval.ts'
 import { checkGitConnection, checkGithubConnection, type GithubConnectionFailure } from './github-connection.ts'
 import { chooseGitTransport, sshGitSpec } from './git-transport.ts'
 import { newerVersions, VERSION_FIELDS, VERSION_LIST_FIELDS, versionFacts } from './versions.ts'
+import { combineVerdicts, quarantineFetch, type InstallGate, type InstallGateVerdict } from './install-gate.ts'
 import type {
   BundleDetail, BundleInfo, BundleRowInfo, ChangeResult, InspectOptions, InstallBundleOptions, ListVersionsOptions, ManagementError,
   PackageResult, PluginChange, PluginEntryId, PluginInfo, PluginInstallCancellation, PluginInstallProgress, PluginInstallRequestId,
@@ -86,6 +87,13 @@ export interface Config {
   detailFetchTimeoutMs?: number
   /** npm file CDNs that offered bundles are read from, in order; a read's `npmFileSources` moves the CDNs it names first. */
   detailNpmFileSources?: NpmFileSource[]
+  /**
+   * Refuse every bundle installation with `gate-missing` while no install gate is registered. Updates and
+   * agent tool installations go through the same check; reinstalling the version an update removed does not.
+   */
+  requireInstallGate?: boolean
+  /** Bound on the pnpm fetch into an install gate's quarantine directory, in milliseconds. */
+  quarantineFetchTimeoutMs?: number
 }
 
 /** The Fetch route serving images beside bundle detail documents. */
@@ -338,6 +346,8 @@ export class PluginManager extends TypertRemoteService {
     detailImageMaxBytes: z.natural().min(1).default(5 * 1024 * 1024),
     detailFetchTimeoutMs: z.natural().min(1).max(MAX_TIMER_DELAY_MS).default(15000),
     detailNpmFileSources: z.array(z.union(NPM_FILE_SOURCES)).min(1).default([...NPM_FILE_SOURCES]),
+    requireInstallGate: z.boolean().default(false),
+    quarantineFetchTimeoutMs: z.number().step(1).min(1000).default(600000),
   })
   /** Management bundles remain protected if their files become unreadable. */
   private readonly managementBundles = new Set<string>()
@@ -364,6 +374,10 @@ export class PluginManager extends TypertRemoteService {
   /** Installations by request id, from their call until it settles. */
   private readonly installs = new Map<PluginInstallRequestId, InstallControl>()
   private readonly detail: BundleDetailOptions
+  private readonly requireInstallGate: boolean
+  private readonly quarantineFetchTimeoutMs: number
+  /** Registered install gates by id, in registration order. */
+  private readonly installGates = new Map<string, InstallGate>()
 
   constructor(ctx: Context, config: Config) {
     super(ctx, 'pluginManager')
@@ -385,6 +399,8 @@ export class PluginManager extends TypertRemoteService {
       fallbackRegistries: (config as Required<Config>).fallbackRegistries.map(normalizeRegistry),
     }
     const required = config as Required<Config>
+    this.requireInstallGate = required.requireInstallGate
+    this.quarantineFetchTimeoutMs = required.quarantineFetchTimeoutMs
     this.detail = {
       profile: this.profile, maxDocumentBytes: required.detailMaxBytes, maxImageBytes: required.detailImageMaxBytes,
       npmFileSources: required.detailNpmFileSources, timeoutMs: required.detailFetchTimeoutMs, lifetime: this.abort.signal,
@@ -398,6 +414,19 @@ export class PluginManager extends TypertRemoteService {
         path: DETAIL_FILE_PATH, methods: ['GET'], requestBody: 'buffered', fetch: request => this.serveDetailFile(request),
       }), `plugin-manager: ${DETAIL_FILE_PATH}`)
     })
+  }
+
+  /**
+   * Register an install gate that rules on every bundle installation before the profile changes. Every registered gate
+   * is asked and the strictest ruling applies. Call it inside the provider's `ctx.effect` so disposal unregisters it.
+   * @param gate The provider.
+   * @returns The disposer that unregisters it.
+   * @throws {Error} When a gate with the same id is registered.
+   */
+  registerInstallGate(gate: InstallGate): () => void {
+    if (this.installGates.has(gate.id)) throw new Error(`plugin-manager: install gate ${gate.id} is already registered`)
+    this.installGates.set(gate.id, gate)
+    return () => { if (this.installGates.get(gate.id) === gate) this.installGates.delete(gate.id) }
   }
 
   /**
@@ -793,9 +822,10 @@ export class PluginManager extends TypertRemoteService {
     if (result.stage === 'enable') await settled('remove', name, this.removeBundle(name))
     // The reinstallation carries no request id, so cancelling the update cannot leave the package removed.
     const previous = target.kind === 'git' ? target.source : `${name}@${from}`
-    const restore = await settled('install', previous, this.installBundle(previous, {
+    // The removed version was admitted when it was installed, so its reinstallation is not gated again.
+    const restore = await settled('install', previous, this.install(previous, {
       saveExact, enabled, ...previousRegistry === undefined ? {} : { registry: previousRegistry },
-    }))
+    }, false))
     return { from, to: version, step: 'install', result, restore }
   }
 
@@ -967,6 +997,11 @@ export class PluginManager extends TypertRemoteService {
    */
   @Remote
   installBundle(spec: string, options?: InstallBundleOptions): Promise<ChangeResult> {
+    return this.install(spec, options, true)
+  }
+
+  /** `installBundle`, with `gated` false only for reinstalling a version this manager removed during an update. */
+  private install(spec: string, options: InstallBundleOptions | undefined, gated: boolean): Promise<ChangeResult> {
     const requestId = options?.requestId
     const control: InstallControl = { abort: new AbortController(), phase: 'installing', result: Promise.resolve(null) }
     const stopped = (): boolean => control.abort.signal.aborted || this.abort.signal.aborted
@@ -974,6 +1009,7 @@ export class PluginManager extends TypertRemoteService {
     const announce = (phase: PluginInstallProgress['phase'], attempt?: PluginInstallProgress['attempt']): void => {
       if (requestId !== undefined) this.ownerContext.emit('plugin-manager/install-state', { requestId, phase, ...attempt === undefined ? {} : { attempt } })
     }
+    let verdict: InstallGateVerdict | undefined
     const result = this.change(async (result) => {
       if (spec.trim() === '' || spec.startsWith('-')) throw new ManagementFailure('invalid-spec')
       if (stopped()) throw new InstallCancelledError()
@@ -982,6 +1018,17 @@ export class PluginManager extends TypertRemoteService {
       const known = specPackageName(spec, before, this.profile.dir)
       if (this.ownerContext.get('hmr') !== undefined && known !== undefined && Object.hasOwn(before, known)) {
         throw new ManagementFailure('already-installed')
+      }
+      if (gated) {
+        verdict = await this.vet(spec, options, control.abort.signal, requestId)
+        if (verdict !== undefined) {
+          result.gateReport = verdict.report
+          if (verdict.report.level === 'block') throw new ManagementFailure('gate-blocked')
+          if (verdict.report.level === 'review' && options?.gateAcknowledged !== verdict.report.digest) {
+            throw new ManagementFailure('gate-review')
+          }
+        }
+        if (stopped()) throw new InstallCancelledError()
       }
       if (options?.approvedBuilds !== undefined) {
         await approveBuilds(this.profile.dir, options.approvedBuilds)
@@ -1083,6 +1130,8 @@ export class PluginManager extends TypertRemoteService {
         const dir = resolveBundleDir('dsh', name, this.profile.installAnchor, this.profile.dir)
         const manifest = bundleManifest(name, this.profile.dir, this.profile.installAnchor)
         if (manifest?.dsh?.bundle === undefined) throw new ManagementFailure('not-bundle')
+        // The profile fetched the spec again; its files must be the ones the gate scanned.
+        if (verdict !== undefined && !(await verdict.verifyInstalled(dir))) throw new ManagementFailure('gate-mismatch')
         const compatibility = evaluatePluginCompatibility(manifest, readProfileVersionExemptions(this.profile.dir))
         if (compatibility !== undefined && !compatibility.exempted) throw new ManagementFailure('incompatible-version', [incompatiblePlugin(compatibility)])
         for (const file of bundlePatchPaths(dir, manifest.dsh.bundle)) loadOverlayPatches('dsh', file)
@@ -1109,7 +1158,63 @@ export class PluginManager extends TypertRemoteService {
       })
     }, { stage: 'install', target: spec, enabled: options?.enabled !== false }, 'install')
     control.result = result
-    return result.finally(() => { if (requestId !== undefined) this.installs.delete(requestId) })
+    return result.finally(() => {
+      if (requestId !== undefined) this.installs.delete(requestId)
+    }).then(async (settled) => {
+      // The quarantine goes once the installation settled, whatever its outcome.
+      await verdict?.dispose()
+      return settled
+    }, async (error: unknown) => {
+      await verdict?.dispose()
+      throw error
+    })
+  }
+
+  /**
+   * Hand the spec to the registered install gate.
+   * @returns The ruling, or undefined when no gate is registered and none is required.
+   */
+  private async vet(
+    spec: string, options: InstallBundleOptions | undefined, cancel: AbortSignal, requestId: PluginInstallRequestId | undefined,
+  ): Promise<InstallGateVerdict | undefined> {
+    const gates = [...this.installGates.values()]
+    if (gates.length === 0) {
+      if (this.requireInstallGate) throw new ManagementFailure('gate-missing')
+      return undefined
+    }
+    if (requestId !== undefined) this.ownerContext.emit('plugin-manager/install-state', { requestId, phase: 'scanning' })
+    const registry = registryPlan(options?.registry, await this.registries())[0] ?? null
+    const jobId = randomUUID()
+    const argv = ['dsh-install-gate', spec]
+    const log = (text: string, stream: 'stdout' | 'stderr'): void => {
+      if (requestId !== undefined) this.ownerContext.emit('plugin-manager/install-log', { requestId, jobId, argv, cwd: this.profile.dir, stream, text })
+    }
+    const signal = AbortSignal.any([this.abort.signal, cancel])
+    const request = {
+      spec, registry, log, signal,
+      fetch: (dir: string, fetchSignal: AbortSignal) => quarantineFetch(dir, fetchSignal, {
+        invocation: this.profile.packageManager ?? { command: this.pnpmCommand, args: [], env: {} },
+        profileDir: this.profile.dir, cwd: this.profile.cwd, spec, registry, outputBytes: this.outputBytes,
+        timeoutMs: this.quarantineFetchTimeoutMs, onOutput: log,
+      }),
+    }
+    const vetting = (async () => {
+      const settled = await Promise.allSettled(gates.map(gate => gate.vet(request)))
+      const verdicts = settled.flatMap(item => item.status === 'fulfilled' ? [item.value] : [])
+      const failure = settled.find(item => item.status === 'rejected')
+      // A gate that could not rule fails the installation; the others' quarantines are released.
+      if (failure !== undefined) {
+        await Promise.allSettled(verdicts.map(verdict => verdict.dispose()))
+        throw failure.reason
+      }
+      return combineVerdicts(verdicts)
+    })()
+    this.packageOperations.add(vetting)
+    try { return await vetting }
+    finally {
+      this.packageOperations.delete(vetting)
+      if (requestId !== undefined) this.ownerContext.emit('plugin-manager/install-log', { requestId, jobId, argv, cwd: this.profile.dir, stream: 'stdout', text: '', exitCode: 0 })
+    }
   }
 
   /** Recover the result of an active installation without cancelling it.

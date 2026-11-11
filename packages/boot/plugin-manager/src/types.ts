@@ -36,7 +36,7 @@ export interface IncompatiblePlugin {
 
 /** Localizable management failure and optional external diagnostic. */
 export interface ManagementError {
-  code: ReadOnlyReason | 'unknown-plugin' | 'invalid-spec' | 'already-installed' | 'ambiguous-install' | 'not-bundle' | 'not-removable' | 'stop-profile' | 'bundle-in-use' | 'stale-approval' | 'incompatible-version' | 'unsupported-platform' | 'unexpected-package' | 'operation-error'
+  code: ReadOnlyReason | 'unknown-plugin' | 'invalid-spec' | 'already-installed' | 'ambiguous-install' | 'not-bundle' | 'not-removable' | 'stop-profile' | 'bundle-in-use' | 'stale-approval' | 'incompatible-version' | 'unsupported-platform' | 'unexpected-package' | 'operation-error' | 'gate-blocked' | 'gate-review' | 'gate-mismatch' | 'gate-missing'
   diagnostic?: string
   /** Present with `incompatible-version`: the packages the running DSH version rejects. */
   incompatible?: IncompatiblePlugin[]
@@ -197,6 +197,84 @@ export interface ChangeResult {
    * tarball spec is fetched from, which no registry stands in for; absent for a failure neither explains.
    */
   failedAt?: 'registry' | 'spec-host'
+  /**
+   * The install gates' combined report on the quarantined copy of the spec, when a gate is registered. A `block` report
+   * fails the installation with `gate-blocked`; a `review` report fails it with `gate-review` until the call repeats
+   * with `gateAcknowledged` set to the report's digest.
+   */
+  gateReport?: InstallGateReport
+}
+
+/** Localized display text: English plus any other locales, keyed by locale tag. */
+export interface InstallGateText {
+  readonly en: string
+  readonly [locale: string]: string
+}
+
+/** How an install gate rules on a package: install, install after explicit acknowledgement, or refuse. */
+export type InstallGateLevel = 'pass' | 'review' | 'block'
+
+/** Normalized severity of one finding. */
+export type InstallGateSeverity = 'critical' | 'high' | 'medium' | 'low' | 'info'
+
+/**
+ * What one check inside a gate produced: `clean` and `findings` ran to completion; `not-applicable` had nothing to
+ * check; `disabled` was turned off; `unavailable` could not run; `error` failed.
+ */
+export type InstallGateCheckStatus = 'clean' | 'findings' | 'not-applicable' | 'disabled' | 'unavailable' | 'error'
+
+/** One check a gate ran, such as one scanner or one policy rule. */
+export interface InstallGateCheck {
+  /** Stable identifier within the gate. */
+  readonly id: string
+  /** Display name; the id when absent. */
+  readonly name?: string
+  readonly status: InstallGateCheckStatus
+  /** Findings this check reported, including ones beyond the report's finding cap. */
+  readonly findings: number
+  /** Plain-text failure or skip reason; untrusted, rendered as text. */
+  readonly detail?: string
+  readonly durationMs?: number
+}
+
+/** One finding; every text field may come from the package or a tool and is rendered as plain text, never shown to the model. */
+export interface InstallGateFinding {
+  /** The check that reported it. */
+  readonly source: string
+  readonly severity: InstallGateSeverity
+  /** Category, such as `data_exfiltration`, `secret`, `vulnerability` or `license`. */
+  readonly category: string
+  readonly title: string
+  readonly ruleId?: string
+  /** Path relative to the package root. */
+  readonly file?: string
+  readonly line?: number
+}
+
+/** One gate's ruling on one quarantined package, or several gates' rulings combined. */
+export interface InstallGateReport {
+  /** Digest over what the gates checked; acknowledging a review names this digest. */
+  readonly digest: string
+  /** The spec the installation asked for. */
+  readonly spec: string
+  readonly packageName?: string
+  readonly version?: string
+  readonly level: InstallGateLevel
+  /** 0 to 100 when a gate scores packages; the lowest score of the combined gates. */
+  readonly score?: number
+  /** Why the level is not `pass`, written and localized by the gate. */
+  readonly reasons: readonly InstallGateText[]
+  readonly checks?: readonly InstallGateCheck[]
+  /** Findings, most severe first, capped by each gate. */
+  readonly findings: readonly InstallGateFinding[]
+  /** Findings dropped by the cap. */
+  readonly omittedFindings: number
+  /** Gate-defined counts shown with the report, such as `skills` or `dependencies`. */
+  readonly metrics?: Readonly<Record<string, number>>
+  /** Ids of the gates that produced the report. */
+  readonly gates: readonly string[]
+  /** ISO time the check finished. */
+  readonly checkedAt: string
 }
 
 /** Identifies one installation from its start to its settlement, including its log chunks and cancellation. */
@@ -219,6 +297,11 @@ export interface InstallBundleOptions {
    * same way and fails with `not-bundle`, and one whose bundle patches cannot load fails as an operation error.
    */
   expected?: { readonly name: string; readonly version: string }
+  /**
+   * The digest of a `review` gate report the user acknowledged; installation proceeds only while the quarantined copy
+   * still has this digest.
+   */
+  gateAcknowledged?: string
 }
 
 /** Where an inspection asks. */
@@ -362,7 +445,7 @@ export interface PluginUpdateResult {
 /** The Host phase of one installation, before its install call settles; `installing` is announced once per registry asked. */
 export interface PluginInstallProgress {
   readonly requestId: PluginInstallRequestId
-  readonly phase: 'installing' | 'cancelling' | 'applying'
+  readonly phase: 'scanning' | 'installing' | 'cancelling' | 'applying'
   /** With `installing`: the registry this attempt asks, its one-based position, and how many the installation may ask. */
   readonly attempt?: { readonly registry: Registry; readonly index: number; readonly total: number }
 }

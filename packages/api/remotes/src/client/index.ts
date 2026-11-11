@@ -43,6 +43,7 @@ export type {
   PluginInstallLogChunk, PluginInstallProgress, PluginInstallRequestId, PluginRegistries, PluginSpecInspection,
   PluginUpdateProgress, PluginUpdateResult, PluginUpdateStep, PluginVersion, PluginVersionList, RegistryAttempt,
   ReadOnlyReason, Registry, RestartReason,
+  InstallGateCheck, InstallGateCheckStatus, InstallGateFinding, InstallGateLevel, InstallGateReport, InstallGateSeverity, InstallGateText,
 } from '@deepseek-ai/dsh-plugin-manager/types'
 export type { McpManagedServerStatus, McpManagedServerView } from '@deepseek-ai/dsh-mcp-manager/types'
 export type {} from '@deepseek-ai/dsh-plugin-manager/remote'

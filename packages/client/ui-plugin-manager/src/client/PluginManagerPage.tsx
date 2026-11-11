@@ -45,7 +45,7 @@ export type PluginManagerPageProps =
   & PropsRenderSlots<
     | 'plugins.item' | 'plugins.bundle.config' | 'plugins.row.config' | 'plugins.bundle.activation'
     | 'plugins.add.actions' | 'plugins.tab'
-    | 'plugins.detail.actions' | 'plugins.detail.badge' | 'plugins.detail.section'
+    | 'plugins.detail.actions' | 'plugins.detail.badge' | 'plugins.detail.section' | 'plugins.install.gate'
   >
   & InjectFace<PluginManagerFace & PluginHeaderLayoutFace>
   & PropsStore<ReturnType<typeof createNavigationStore>>
@@ -1033,10 +1033,13 @@ function useInstallComposition(active: boolean) {
  */
 function InstallDialog({
   install, t, onClose, onEditSpec, onRun, onCancel, onReconcile, onToggleDetails, onEnableNow, onApproveBuilds,
-  onToggleRegistry, onChooseRegistry, onChangeRegistry, onUseGithubMirror,
+  onToggleRegistry, onChooseRegistry, onChangeRegistry, onUseGithubMirror, onAcknowledgeGate, renderSlot,
 }: {
   readonly install: InstallState
   readonly t: Translate
+  /** Install the reviewed package anyway, with its gate report acknowledged. */
+  readonly onAcknowledgeGate: () => void
+  readonly renderSlot: RenderConfig
   readonly onClose: () => void
   readonly onEditSpec: (text: string) => void
   readonly onRun: () => void
@@ -1366,6 +1369,11 @@ function InstallDialog({
     acceptance: 'installAwaitingAcceptance',
   } as const)[failure.uncertainty], { reason: failure.reason })
   const pendingBuilds = phase === 'failed' ? install.failure?.pendingBuilds ?? [] : []
+  // The gate report shows for a gate refusal and for a finished installation the gates admitted.
+  const gateOutcome = phase === 'done' ? 'installed' as const
+    : phase === 'failed' && failure?.code === 'gate-review' ? 'review' as const
+      : phase === 'failed' && failure?.code === 'gate-blocked' ? 'blocked' as const
+        : null
   const approvable = pendingBuilds.length > 0
   const firstRun = install.runs[0]
   // The registries the Host asked, once there is more than one: the attempt under way while it runs, a badge on each run.
@@ -1427,6 +1435,12 @@ function InstallDialog({
           {subject === null
             ? null
             : <SubjectCard subject={phase === 'done' && install.installedVersion !== null ? { ...subject, version: install.installedVersion } : subject} confirmed={install.confirmed} t={t} />}
+          {gateOutcome === null || install.gateReport === null
+            ? null
+            : renderSlot('plugins.install.gate', {
+              report: install.gateReport, outcome: gateOutcome,
+              ...gateOutcome === 'review' ? { acknowledge: onAcknowledgeGate } : {},
+            })}
           {approvable
             ? (
               <section className={css.approval} role="group" aria-labelledby={approvalId} data-install-approval>
@@ -1907,6 +1921,8 @@ export function PluginManagerPage(props: PluginManagerPageProps): ReactNode {
         onChooseRegistry={props.chooseRegistry}
         onChangeRegistry={props.changeRegistry}
         onUseGithubMirror={props.useGithubMirror}
+        onAcknowledgeGate={props.acknowledgeGateAndRetry}
+        renderSlot={renderSlot}
       />
       {state.confirm === null
         ? null

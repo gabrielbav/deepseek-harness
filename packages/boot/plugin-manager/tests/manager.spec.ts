@@ -18,6 +18,7 @@ import {
 import { OPTIONAL_BUNDLES, OFFICIAL_ON_DEMAND_CATALOG } from '@deepseek-ai/dsh-official-bundles'
 import PluginManager, { type Config, type PluginChange, type PluginInstallLogChunk, type PluginInstallProgress, type PluginInstallRequestId } from '../src/index.ts'
 import type { PluginEntryId, PluginOperation } from '../src/types.ts'
+import { profileRequiresInstallGate, type InstallGateRequest } from '../src/install-gate.ts'
 import Hmr from '@deepseek-ai/dsh-hmr'
 import Timer from '@deepseek-ai/cordis-plugin-timer'
 import type { PatchOptions } from '@deepseek-ai/cordis-plugin-include'
@@ -2521,4 +2522,138 @@ it('refuses an update whose target does not match where the copy was installed f
   expect(pnpm).not.toHaveBeenCalled()
   expect(view).not.toHaveBeenCalled()
   expect(readFileSync(join(dir, 'package.json'), 'utf8')).toBe(before)
+})
+
+/** An install gate that rules `level` on every spec and reports whether the installed files match. */
+function gate(level: 'pass' | 'review' | 'block', matches = true, id = 'test-gate', digest = 'd1') {
+  const disposed = vi.fn(async () => {})
+  const verifyInstalled = vi.fn(async () => matches)
+  const vet = vi.fn(async (request: InstallGateRequest) => {
+    request.log('scanning\n', 'stdout')
+    return {
+      report: {
+        digest, spec: request.spec, packageName: 'gated', score: level === 'pass' ? 100 : level === 'review' ? 70 : 0, level,
+        reasons: level === 'pass' ? [] : [{ en: `${id} needs review` }], findings: [], omittedFindings: 0,
+        gates: [id], checkedAt: new Date(0).toISOString(),
+      },
+      verifyInstalled, dispose: disposed,
+    }
+  })
+  return { id, vet, verifyInstalled, disposed }
+}
+
+/** A pnpm run that adds the `gated` bundle to the profile. */
+function addGated(dir: string) {
+  return vi.spyOn(operations, 'runProfilePnpm').mockImplementation(async () => {
+    const path = join(dir, 'node_modules', 'gated')
+    mkdirSync(path, { recursive: true })
+    writeFileSync(join(path, 'package.json'), JSON.stringify({ name: 'gated', version: '1.0.0', dsh: { bundle: { patch: './cordis.patch.yml' } } }))
+    writeFileSync(join(path, 'cordis.patch.yml'), '[]\n')
+    const manifest = readProfileManifest('test', dir)
+    writeFileSync(join(dir, 'package.json'), JSON.stringify({ ...manifest, dependencies: { ...manifest.dependencies, gated: '1.0.0' } }))
+    return { exitCode: 0, output: '', truncated: false, logPath: '/operation.log' }
+  })
+}
+
+it('refuses every installation with gate-missing while a required gate is absent', async () => {
+  const { manager, dir } = await fixture('live', false, undefined, { requireInstallGate: true })
+  const install = addGated(dir)
+  onTestFinished(() => { install.mockRestore() })
+  expect(await manager.installBundle('gated')).toMatchObject({ application: 'failed', changed: false, error: { code: 'gate-missing' } })
+  expect(install).not.toHaveBeenCalled()
+})
+
+it('blocks a package the gate rates high risk before pnpm runs and disposes its quarantine', async () => {
+  const { manager, dir } = await fixture()
+  const install = addGated(dir)
+  onTestFinished(() => { install.mockRestore() })
+  const ruling = gate('block')
+  const unregister = manager.registerInstallGate(ruling)
+  onTestFinished(unregister)
+  const result = await manager.installBundle('gated')
+  expect(result).toMatchObject({ application: 'failed', changed: false, error: { code: 'gate-blocked' }, gateReport: { level: 'block', digest: 'd1' } })
+  expect(install).not.toHaveBeenCalled()
+  expect(ruling.disposed).toHaveBeenCalledOnce()
+  expect(readProfileManifest('test', dir).dependencies).toEqual({ extra: '1.0.0' })
+})
+
+it('installs a reviewed package only with the acknowledged digest and checks the installed files', async () => {
+  const { manager, dir } = await fixture()
+  const install = addGated(dir)
+  onTestFinished(() => { install.mockRestore() })
+  const ruling = gate('review')
+  const unregister = manager.registerInstallGate(ruling)
+  onTestFinished(unregister)
+  expect(await manager.installBundle('gated')).toMatchObject({ application: 'failed', error: { code: 'gate-review' }, gateReport: { level: 'review' } })
+  expect(await manager.installBundle('gated', { gateAcknowledged: 'other' })).toMatchObject({ error: { code: 'gate-review' } })
+  expect(install).not.toHaveBeenCalled()
+  const result = await manager.installBundle('gated', { gateAcknowledged: 'd1', enabled: false })
+  expect(result).toMatchObject({ bundle: 'gated', gateReport: { digest: 'd1' } })
+  expect(result.error).toBeUndefined()
+  expect(ruling.verifyInstalled).toHaveBeenCalledWith(join(dir, 'node_modules', 'gated'))
+  expect(ruling.disposed).toHaveBeenCalledTimes(3)
+})
+
+it('rolls back an installation whose files differ from the scanned copy', async () => {
+  const { manager, dir } = await fixture()
+  const install = addGated(dir)
+  onTestFinished(() => { install.mockRestore() })
+  const unregister = manager.registerInstallGate(gate('pass', false))
+  onTestFinished(unregister)
+  expect(await manager.installBundle('gated')).toMatchObject({ application: 'failed', error: { code: 'gate-mismatch' } })
+  expect(readProfileManifest('test', dir).dependencies).toEqual({ extra: '1.0.0' })
+})
+
+it('registers each install gate id once and unregisters it on disposal', async () => {
+  const { manager, dir } = await fixture('live', false, undefined, { requireInstallGate: true })
+  const install = addGated(dir)
+  onTestFinished(() => { install.mockRestore() })
+  const unregister = manager.registerInstallGate(gate('pass'))
+  expect(() => manager.registerInstallGate(gate('pass'))).toThrow(/already registered/)
+  unregister()
+  expect(await manager.installBundle('gated')).toMatchObject({ error: { code: 'gate-missing' } })
+})
+
+it('asks every registered gate and follows the strictest ruling with a digest covering all of them', async () => {
+  const { manager, dir } = await fixture()
+  const install = addGated(dir)
+  onTestFinished(() => { install.mockRestore() })
+  const lenient = gate('pass', true, 'lenient', 'a')
+  const strict = gate('review', true, 'strict', 'b')
+  const disposers = [manager.registerInstallGate(lenient), manager.registerInstallGate(strict)]
+  onTestFinished(() => { for (const dispose of disposers) dispose() })
+  const reviewed = await manager.installBundle('gated')
+  expect(reviewed).toMatchObject({ error: { code: 'gate-review' }, gateReport: { level: 'review', score: 70, gates: ['lenient', 'strict'], reasons: [{ en: 'strict needs review' }] } })
+  const digest = reviewed.gateReport?.digest
+  expect(digest).not.toBe('a')
+  expect(digest).not.toBe('b')
+  expect(await manager.installBundle('gated', { gateAcknowledged: 'b' })).toMatchObject({ error: { code: 'gate-review' } })
+  const installed = await manager.installBundle('gated', { gateAcknowledged: digest ?? '', enabled: false })
+  expect(installed).toMatchObject({ bundle: 'gated' })
+  expect(lenient.verifyInstalled).toHaveBeenCalledOnce()
+  expect(strict.verifyInstalled).toHaveBeenCalledOnce()
+  expect(lenient.disposed).toHaveBeenCalledTimes(3)
+})
+
+it('fails an installation when one gate cannot rule and releases the other quarantines', async () => {
+  const { manager, dir } = await fixture()
+  const install = addGated(dir)
+  onTestFinished(() => { install.mockRestore() })
+  const working = gate('pass', true, 'working')
+  const broken = { id: 'broken', vet: vi.fn(async () => { throw new Error('scanner crashed') }) }
+  const disposers = [manager.registerInstallGate(working), manager.registerInstallGate(broken)]
+  onTestFinished(() => { for (const dispose of disposers) dispose() })
+  expect(await manager.installBundle('gated')).toMatchObject({ application: 'failed', error: { code: 'operation-error', diagnostic: 'scanner crashed' } })
+  expect(install).not.toHaveBeenCalled()
+  expect(working.disposed).toHaveBeenCalledOnce()
+})
+
+it('reads whether a profile patch requires an install gate', () => {
+  const root = mkdtempSync(join(tmpdir(), 'install-gate-profile-'))
+  onTestFinished(() => { rmSync(root, { recursive: true, force: true }) })
+  expect(profileRequiresInstallGate(root)).toBe(false)
+  writeFileSync(join(root, 'cordis.patch.yml'), '- id: plugin-manager\n  config:\n    requireInstallGate: !!js "true"\n')
+  expect(profileRequiresInstallGate(root)).toBe(false)
+  writeFileSync(join(root, 'cordis.patch.yml'), '- id: other\n  config: { requireInstallGate: true }\n- id: plugin-manager\n  name: x\n  config:\n    requireInstallGate: true\n')
+  expect(profileRequiresInstallGate(root)).toBe(true)
 })
