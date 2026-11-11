@@ -113,6 +113,14 @@ CLI 提供 `dsh plugin --profile <profile> version-exemptions`、`allow-version 
 
 失败：`listBundles()` 未列出或无法解析其目录的组合包为 `plugin-manager/unknown-bundle`；无效语言为 `plugin-manager/invalid-language`；`plugin-manager/detail-unavailable` 携带 `reason`，取值为 `too-large`、`network`，或在 locale 文件或 `meta.detail` 格式错误、指定的文件不存在时为 `invalid`。图片路由对这些失败依次返回 404、413、502 和 400。
 
+### 安装闸门
+
+插件在自己的 `ctx.effect` 中注册安装闸门（`@deepseek-ai/dsh-plugin-manager/install-gate`）来审查安装：`ctx.pluginManager.registerInstallGate({ id, vet })` 返回注销函数。闸门可以实现任意策略：安全扫描、发布者白名单、许可证策略、npm 签名或构建证明检查，或组织的审批服务。每次安装（包括更新的目标版本和 `plugin_manager` 工具调用）都会在配置变更前询问所有已注册的闸门；更新时重新安装被移除的旧版本不会再次询问。`vet` 收到安装规格和 `fetch(dir, signal)`，后者使用配置的 pnpm、registry 和 `.npmrc`，在禁用生命周期脚本的情况下把规格安装到隔离目录。它返回 `InstallGateReport`（`pass` / `review` / `block`、闸门自己本地化的原因、发现、内容摘要，以及可选的评分、检查项和指标）、`verifyInstalled(dir)` 和 `dispose()`。
+
+安装遵循最严格的裁定；合并报告保留每个闸门的原因和发现、最低评分，以及覆盖每个闸门摘要的摘要。`block` 以 `gate-blocked` 失败。`review` 以 `gate-review` 失败，直到调用携带等于该摘要的 `gateAcknowledged` 重试；插件页面通过 `plugins.install.gate` 插槽提供这一步，`plugin_manager` 工具则在对话中以仅用于展示的审批文本询问用户。pnpm 把包装入配置后，每个闸门都必须用 `verifyInstalled` 确认已安装目录，否则安装以 `gate-mismatch` 回滚。闸门抛出异常时安装作为操作错误失败。设置 `requireInstallGate: true` 时，没有已注册闸门的安装以 `gate-missing` 失败；配置自身补丁设置了该项时，`dsh plugin add`（以及 `update`、`install <spec>`）会拒绝执行，因为该命令不运行闸门。
+
+原因和发现可能引用包或工具的内容：模型读取的工具结果只携带级别、评分、闸门 id 和检查项状态。
+
 -----
 
 <a id="understand-the-implementation"></a>

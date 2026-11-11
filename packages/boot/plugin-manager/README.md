@@ -113,6 +113,14 @@ An installed bundle is read from its directory, without network access. An offic
 
 Failures: `plugin-manager/unknown-bundle` for a bundle `listBundles()` does not list or whose directory cannot be resolved, `plugin-manager/invalid-language`, and `plugin-manager/detail-unavailable` with `reason` `too-large`, `network`, or `invalid` for a malformed locale file or `meta.detail`, or a named file that does not exist. The image route answers them with 404, 413, 502, and 400.
 
+### Install gates
+
+A plugin vets installations by registering an install gate (`@deepseek-ai/dsh-plugin-manager/install-gate`) inside its `ctx.effect`: `ctx.pluginManager.registerInstallGate({ id, vet })` returns the disposer. A gate can implement any policy: a security scan, a publisher allowlist, a license policy, npm signature or build-attestation checks, or an organization's approval service. Every installation, including an update's target and a `plugin_manager` tool call, asks every registered gate before the profile changes; reinstalling the version an update removed is not asked again. `vet` receives the spec and a `fetch(dir, signal)` that installs it into a quarantine directory with lifecycle scripts disabled, using the profile's pnpm, registry and `.npmrc`. It returns an `InstallGateReport` (`pass` / `review` / `block`, the gate's own localized reasons, findings, a content digest, and an optional score, checks and metrics), `verifyInstalled(dir)`, and `dispose()`.
+
+The installation follows the strictest ruling; the combined report keeps every gate's reasons and findings, the lowest score, and a digest that covers every gate's digest. `block` fails with `gate-blocked`. `review` fails with `gate-review` until the call repeats with `gateAcknowledged` set to that digest; the Plugins page offers this through the `plugins.install.gate` slot, and the `plugin_manager` tool asks the person in the conversation with the report as display-only approval text. After pnpm installs the package, every gate must confirm the installed directory with `verifyInstalled`, or the installation is rolled back with `gate-mismatch`. A gate that rejects fails the installation as an operation error. With `requireInstallGate: true`, an installation while no gate is registered fails with `gate-missing`, and `dsh plugin add` (and `update`, `install <spec>`) refuses a profile whose own patch sets it, because that command runs no gates.
+
+Reasons and findings may quote the package or a tool: the tool result the model reads carries the level, score, gate ids and check statuses only.
+
 -----
 
 <a id="understand-the-implementation"></a>

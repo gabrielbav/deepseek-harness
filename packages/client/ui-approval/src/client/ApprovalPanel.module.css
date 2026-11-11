@@ -190,6 +190,8 @@
 
 .description {
   margin: 0;
+  white-space: pre-line;
+  overflow-wrap: anywhere;
   color: var(--dsw-alias-label-secondary);
   font-size: 13px;
   line-height: 20px;

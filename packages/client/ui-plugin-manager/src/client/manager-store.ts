@@ -31,6 +31,7 @@ import type {
   ReadOnlyReason,
   Registry,
   RestartReason,
+  InstallGateReport,
 } from '@deepseek-ai/dsh-api-remotes/client'
 import { normalizeRegistry, NPMMIRROR_REGISTRY, OFFICIAL_NPM_REGISTRY, REGISTRY_URL } from '@deepseek-ai/dsh-plugin-manager/registry'
 import { createSnapshotStore, type SnapshotStore } from '@deepseek-ai/dsh-client-store'
@@ -291,6 +292,8 @@ export interface InstallState {
   } | null
   /** The packages whose install scripts the finished run was allowed to execute, saved for this profile. */
   readonly approvedBuilds: readonly string[]
+  /** The install gate's report from the Host's last answer for this installation; null when no gate answered. */
+  readonly gateReport: InstallGateReport | null
   /** Enabling the newly installed bundle from the installed screen is crossing the wire. */
   readonly enabling: boolean
 }
@@ -463,6 +466,8 @@ export interface PluginManagerFace {
   useGithubMirror: () => void
   /** Allow the install scripts the failed run left pending, saved for this profile, and run the same spec again. */
   approveBuildsAndRetry: () => void
+  /** Install the reviewed package anyway, with its gate report acknowledged. */
+  acknowledgeGateAndRetry: () => void
   /** Leave the check or the failed screen for the spec, or ask the Host to stop the run and wait for its cleanup. */
   cancelInstall: () => void
   /** Ask the Host for the result of an installation whose original reply was lost. */
@@ -613,7 +618,7 @@ export function sortPackages(packages: readonly PackageView[]): PackageView[] {
 const IDLE_INSTALL: InstallState = {
   open: false, spec: '', registries: null, registry: OFFICIAL_REGISTRY, registryOpen: false, registryError: false, attempts: null,
   phase: 'idle', inputError: null, subject: null, runs: [], detailsOpen: false, logPath: null,
-  installed: null, installedVersion: null, restartRequired: false, failure: null, approvedBuilds: [], enabling: false,
+  installed: null, installedVersion: null, restartRequired: false, failure: null, approvedBuilds: [], gateReport: null, enabling: false,
 }
 
 /** The dialog back at its spec: the run and its outcome forgotten, the spec and the registries kept. */
@@ -818,6 +823,7 @@ export class PluginManagerController {
         this.patch({ install: { ...recovered, registry } })
       },
       approveBuildsAndRetry: () => { void this.approveBuildsAndRetry() },
+      acknowledgeGateAndRetry: () => { void this.acknowledgeGateAndRetry() },
       cancelInstall: () => { void this.cancelInstall() },
       reconcileInstall: () => { void this.reconcileInstall() },
       toggleInstallDetails: () => { this.patchInstall({ detailsOpen: !this.getSnapshot().install.detailsOpen }) },
@@ -1001,7 +1007,7 @@ export class PluginManagerController {
     }
     const attempt = progress.attempt
     this.patchInstall({
-      phase: progress.phase === 'installing' ? 'running' : progress.phase,
+      phase: progress.phase === 'installing' || progress.phase === 'scanning' ? 'running' : progress.phase,
       ...attempt === undefined
         ? {}
         : { attempts: { registries: [...install.attempts?.registries ?? [], attempt.registry], total: attempt.total } },
@@ -1248,7 +1254,7 @@ export class PluginManagerController {
     this.inspectAbort = controller
     this.patchInstall({
       phase: 'checking', inputError: null, subject: catalogSubject ?? null, runs: [], detailsOpen: false, attempts: null, registryOpen: false,
-      installed: null, installedVersion: null, restartRequired: false, failure: null, approvedBuilds: [], logPath: null,
+      installed: null, installedVersion: null, restartRequired: false, failure: null, approvedBuilds: [], logPath: null, gateReport: null,
     })
     const read = this.registryRead
     if (read !== undefined && choice === read.choice && read.done !== undefined) {
@@ -1286,14 +1292,14 @@ export class PluginManagerController {
    * `approvedBuilds` names the pending install scripts the person allowed;
    * the Host saves that permission for this profile before pnpm runs.
    */
-  private async startInstall(subject: InstallSubject, approvedBuilds?: readonly string[]): Promise<void> {
+  private async startInstall(subject: InstallSubject, approvedBuilds?: readonly string[], gateAcknowledged?: string): Promise<void> {
     const { spec, registry } = subject
     const requestId = randomUUID() as PluginInstallRequestId
     const request: InstallRequest = { requestId, acknowledged: false, replyLost: false, recovering: false }
     this.request = request
     this.patchInstall({
       phase: 'starting', requestId, subject, runs: [], attempts: null, failure: null, installed: null, installedVersion: null,
-      approvedBuilds: [], logPath: null,
+      approvedBuilds: [], logPath: null, gateReport: null,
     })
     // The Host announces `plugin-manager/changed` while the run is still on
     // the wire, and every such event reads again; those reads must not cancel
@@ -1302,6 +1308,7 @@ export class PluginManagerController {
       enabled: subject.selection ?? false, requestId, registry,
       ...subject.saveExact === undefined ? {} : { saveExact: subject.saveExact },
       ...approvedBuilds === undefined ? {} : { approvedBuilds: [...approvedBuilds] },
+      ...gateAcknowledged === undefined ? {} : { gateAcknowledged },
     })
     if (this.disposed || this.request !== request) return
     if (!result.ok) {
@@ -1352,6 +1359,7 @@ export class PluginManagerController {
         phase: 'failed', runs: settledRuns(runs, packages?.exitCode ?? null),
         failure: failureOf(result.error, packages?.kind, result.pendingBuilds, result.failedAt, result.stage, result.enabled),
         logPath: result.packageResult?.logPath ?? null,
+        gateReport: result.gateReport ?? null,
         ...asked,
       })
     } else {
@@ -1363,6 +1371,7 @@ export class PluginManagerController {
         ...result.restartReason === undefined ? {} : { restartReason: result.restartReason },
         logPath: result.packageResult?.logPath ?? null,
         approvedBuilds: result.approvedBuilds ?? [],
+        gateReport: result.gateReport ?? null,
         ...asked,
       })
     }
@@ -1394,7 +1403,20 @@ export class PluginManagerController {
     const pending = install.failure?.pendingBuilds
     if (install.phase !== 'failed' || install.subject === null || pending === undefined || pending.length === 0) return
     if (this.ctx.get('productAnalytics')?.enabled) this.analyticsAttempt = { input: sanitizeInstallInput(install.subject.spec), started: Date.now() }
-    await this.startInstall(install.subject, pending)
+    // A run that reached pnpm after a reviewed gate report keeps that acknowledgement; the gates check again first.
+    await this.startInstall(install.subject, pending, install.gateReport?.level === 'review' ? install.gateReport.digest : undefined)
+  }
+
+  /**
+   * Repeat the installation with the gate report the person reviewed acknowledged. Only the failed screen of a
+   * `gate-review` refusal offers this; the Host installs only while the quarantined copy keeps the same digest.
+   */
+  private async acknowledgeGateAndRetry(): Promise<void> {
+    const install = this.getSnapshot().install
+    const digest = install.gateReport?.digest
+    if (install.phase !== 'failed' || install.subject === null || install.failure?.code !== 'gate-review' || digest === undefined) return
+    if (this.ctx.get('productAnalytics')?.enabled) this.analyticsAttempt = { input: sanitizeInstallInput(install.subject.spec), started: Date.now() }
+    await this.startInstall(install.subject, undefined, digest)
   }
 
   /**

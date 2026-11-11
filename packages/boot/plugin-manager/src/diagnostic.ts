@@ -59,6 +59,10 @@ const operation: z.ZodType<PluginOperation> = z.discriminatedUnion('phase', [
       'unsupported-platform': 'unsupported-platform',
       'unexpected-package': 'unexpected-package',
       'operation-error': 'operation-error',
+      'gate-blocked': 'gate-blocked',
+      'gate-review': 'gate-review',
+      'gate-mismatch': 'gate-mismatch',
+      'gate-missing': 'gate-missing',
     } satisfies { [K in ManagementError['code']]: K }).optional(),
     restartReason: z.enum({
       'no-hmr': 'no-hmr',

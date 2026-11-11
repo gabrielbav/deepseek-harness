@@ -71,7 +71,7 @@ const MIRROR_OPTION = `${en.registryNpmmirror} registry.npmmirror.com`
 const IDLE_INSTALL: InstallState = {
   open: false, spec: '', registries: null, registry: { kind: 'offered', registry: null }, registryOpen: false, registryError: false, attempts: null,
   phase: 'idle', inputError: null, subject: null, runs: [], detailsOpen: false, logPath: null,
-  installed: null, installedVersion: null, restartRequired: false, failure: null, approvedBuilds: [], enabling: false,
+  installed: null, installedVersion: null, restartRequired: false, failure: null, approvedBuilds: [], gateReport: null, enabling: false,
 }
 
 const READY: PluginManagerState = {
@@ -131,6 +131,7 @@ function renderTab(
     changeRegistry: vi.fn(),
     useGithubMirror: vi.fn(),
     approveBuildsAndRetry: vi.fn(),
+    acknowledgeGateAndRetry: vi.fn(),
     enableInstalled: vi.fn(),
     clearHighlight: vi.fn(),
     setEnabled: vi.fn(),

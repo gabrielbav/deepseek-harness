@@ -12,6 +12,7 @@ export function ApprovalPanel(props: ApprovalComposerProps) {
   return props.renderFactorySlot('conversation.approval.card', {
     requestKey: approval.key,
     title: reason ?? props.t('escalation', { toolName: approval.toolName }),
+    ...(approval.displayDescription === undefined ? {} : { description: props.resolveReason(approval.displayDescription) }),
     ...(approval.callId === undefined ? {} : { callId: approval.callId }),
     canAnswer: () => approval.answerable,
     onAllow: () => approval.answer('allowed-once'),

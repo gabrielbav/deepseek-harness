@@ -1,12 +1,27 @@
 /** Profile package management and explicit, exact-version compatibility approvals. */
 import { runPluginCommand, runProfilePnpm, setProfileVersionExemption, type PackageOperationOptions } from '@deepseek-ai/dsh-plugin-manager/operations'
 import { INSTALL_ANCHOR } from './profile-boot.ts'
+import { profileRequiresInstallGate } from '@deepseek-ai/dsh-plugin-manager/install-gate'
 import { initProfile, readProfileCompatibility, resolveProfileDir, type ProfileContext } from '@deepseek-ai/dsh-app-boot'
 import { PROFILE_TEMPLATES, DEFAULT_PROFILE_BUNDLES } from '@deepseek-ai/dsh-official-bundles'
 import { withFileLock } from '@deepseek-ai/dsh-atomic-write'
 import { existsSync } from 'node:fs'
 import { mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
+
+/** pnpm commands that fetch new package code into the profile; `install` only when it names packages. */
+const ADDING_COMMANDS: ReadonlySet<string> = new Set(['add', 'update', 'up', 'upgrade'])
+
+/**
+ * Whether pnpm arguments would add or change package code, as opposed to reinstalling the profile lockfile.
+ * @param args pnpm arguments.
+ * @returns True for `add`, `update` and `install <spec>`.
+ */
+function addsPackages(args: readonly string[]): boolean {
+  const [command, ...rest] = args
+  if (command === undefined) return false
+  return ADDING_COMMANDS.has(command) || ((command === 'install' || command === 'i') && rest.some(arg => !arg.startsWith('-')))
+}
 
 function requireDesktopProfile(dir: string): void {
   if (!existsSync(join(dir, 'package.json'))) {
@@ -78,6 +93,11 @@ export async function runPlugin(profile: string, args: readonly string[], packag
   const versionResult = await versionCommand(profile, args)
   if (versionResult !== undefined) return versionResult
   const dir = resolveProfileDir(profile)
+  // Install gates are plugins of a running profile; this command runs none, so a profile that requires one refuses here.
+  if (addsPackages(args) && profileRequiresInstallGate(dir)) {
+    process.stderr.write(`dsh: profile ${profile} requires an install check before installing packages, which this command cannot run; install from the Plugins page or ask the agent in a conversation.\n`)
+    return 1
+  }
   if (existsSync(join(dir, 'package.json'))) {
     for (const warning of readProfileCompatibility(dir).warnings) process.stderr.write(`dsh: warning: ${warning}\n`)
   }
