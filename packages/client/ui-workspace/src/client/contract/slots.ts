@@ -52,6 +52,7 @@ import type { WorkspaceShortcutState } from '../shortcuts.ts'
 import type { StartSessionOptions } from '../navigation.ts'
 import type {} from './toast.ts'
 import type { createWorkspaceViewStore } from '../stores.ts'
+import type { SessionListPredicate } from '../tree.ts'
 
 declare module '@deepseek-ai/dsh-client-ui-context-menu/client' {
   interface ContextMenuTargetMap {
@@ -255,6 +256,8 @@ export type WorkspaceBrowserInjected = {
     hostInfo: HostObservable<RemoteHostFacts>
     workspaceShortcuts: HostObservable<WorkspaceShortcutState>
     shortcuts: HostObservable<readonly ShortcutCatalogEntry[]>
+    /** Intersection of the registered Session-list filters. */
+    sessionListFilter: HostObservable<SessionListPredicate>
   }
   /** Open the browser search and focus its input. */
   requestSearch: () => void

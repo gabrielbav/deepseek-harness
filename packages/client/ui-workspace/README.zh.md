@@ -97,6 +97,8 @@ Workspace 和 Session 的启动基线均就绪后，空安装环境调用 `works
 
 本包注入 Client `remoteAccess` 服务，并提供根作用域标准 Hook `useWorkspaceAccess(workspaceId, action)`，回答当前 Peer 能否在某个 Workspace 资源上调用 `action`，以及 `ctx.uiWorkspace.whenAccess(workspaceId, action, callback)`，在该答案为 true 期间保持回调的效果，语义同 `ctx.remoteAccess.whenAccess`；快照语义归 [`dsh-api-remote-access`](../../api/remote-access/README.zh.md#client-face)。
 
+插件可在 `ctx.effect()` 中调用 `ctx.uiWorkspace.registerSessionFilter(filter)` 缩小侧栏 Session 列表；该调用返回 disposer。`SessionListFilter` 包含稳定的 `id`、针对 Session 列表 `SessionSummary` 的 `session(summary)` 谓词、针对显示中 `WorkspaceView` 的可选 `workspace(view)` 谓词，以及返回取消订阅函数的 `subscribe(listener)`。用已存在的 `id` 再注册一个过滤器会抛出异常。过滤器在内置的空白、subagent 与归档规则之后取交集：`session` 在分组、平铺与搜索视图中隐藏顶层行，`workspace` 在分组视图中隐藏分组标题及其全部行，且这些 Session 不会移入 Ungrouped。行全部被 `session` 隐藏的分组仍然可见，计数为零。过滤器只改变可见性；已保存的顺序、置顶、归档与当前选择保持不变。过滤器的监听器触发或其 disposer 运行时，浏览器重新推导行。未注册过滤器时，列表保持不变。
+
 <a id="understand-the-implementation"></a>
 ## 理解实现
 

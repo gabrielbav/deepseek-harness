@@ -10,10 +10,11 @@ import type {
   SessionReference,
   SessionTarget,
   SessionListState,
+  SessionSummary,
 } from '@deepseek-ai/dsh-api-session-controller/client'
 // Type-only: pulls the `agentPreset` Session projection value into this program.
 import type {} from '@deepseek-ai/dsh-agent-preset-registry/types'
-import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
+import { createSnapshotStore, type ObservableSnapshot } from '@deepseek-ai/dsh-client-store'
 import type { SubagentAddress } from '@deepseek-ai/dsh-subagent/client'
 import type {
   IWorkspaces, WorkspaceId, WorkspaceSnapshot, WorkspaceView,
@@ -24,6 +25,7 @@ import type { DraftInitializationOptions } from '@deepseek-ai/dsh-client-ui-conv
 import type { RowToast } from './contract/slots.ts'
 import { pinOrderAccounts, pinOrderSource } from './pin-order.ts'
 import type { WorkspaceViewStoreActions } from './stores.ts'
+import { ALL_SESSIONS, type SessionListPredicate } from './tree.ts'
 
 interface MainSelection {
   readonly sessionId?: SessionId
@@ -34,6 +36,36 @@ interface MainSelection {
 export interface StartSessionOptions extends DraftInitializationOptions {
   /** Agent preset the Session runs; the Host default when omitted. */
   readonly agentPreset?: string
+}
+
+/**
+ * Plugin-contributed visibility rule for the sidebar Session list. Filters
+ * intersect: a row or Workspace group is visible only while every registered
+ * filter accepts it. Filters hide rows only; saved order, pin, and archive
+ * state are unchanged.
+ */
+export interface SessionListFilter {
+  /** Stable identifier; registering a second filter with the same id throws. */
+  readonly id: string
+  /**
+   * Decide whether one top-level Session row is visible.
+   * @param summary - Session metadata from the Session list snapshot.
+   * @returns false to hide the row in the grouped, flat, and search views.
+   */
+  session(summary: SessionSummary): boolean
+  /**
+   * Decide whether one Workspace group is visible in the grouped view; omitted accepts every group.
+   * The members of a hidden group stay out of Ungrouped.
+   * @param workspace - Workspace as the browser displays it.
+   * @returns false to hide the group header and all of its rows.
+   */
+  workspace?(workspace: WorkspaceView): boolean
+  /**
+   * Subscribe to predicate changes; the browser derives its rows again when the listener fires.
+   * @param listener - called after either predicate's answers change.
+   * @returns unsubscribe function, called when the filter is unregistered.
+   */
+  subscribe(listener: () => void): () => void
 }
 
 /** Workspace archive and directory operations consumed by Client UI domains. */
@@ -143,6 +175,14 @@ export interface UiWorkspace {
    * @returns idempotent disposer owned by the caller's Cordis fiber.
    */
   whenAccess(workspaceId: WorkspaceId, action: RemoteEndpoint, callback: () => AccessEffect): () => void
+  /**
+   * Register a sidebar Session-list filter until the returned disposer runs;
+   * callers register through `ctx.effect()` so plugin disposal removes it.
+   * @param filter - visibility rule intersected with every other registered filter.
+   * @returns idempotent disposer that unsubscribes and removes the filter.
+   * @throws when a filter with the same id is already registered.
+   */
+  registerSessionFilter(filter: SessionListFilter): () => void
 }
 
 declare module '@deepseek-ai/cordis' {
@@ -175,6 +215,10 @@ class UiWorkspaceService extends Service implements UiWorkspace {
   )
   private mainReference: SessionReference | undefined
   private restorationNavigation: AbortSignal | undefined
+  private readonly sessionFilters = new Map<string, SessionListFilter>()
+  private readonly listFilter = createSnapshotStore<SessionListPredicate>(ALL_SESSIONS)
+  /** Intersection of the registered filters; a new value after every registration, removal, or filter notification. */
+  readonly sessionListPredicate: ObservableSnapshot<SessionListPredicate> = this.listFilter
 
   /**
    * @param ctx - Client root Context.
@@ -426,6 +470,32 @@ class UiWorkspaceService extends Service implements UiWorkspace {
     /* v8 ignore next -- this plugin injects remoteAccess, so the service is active while uiWorkspace is reachable. */
     if (access === undefined) throw new Error('ui-workspace: whenAccess requires the remoteAccess service')
     return access.whenResourceAccess('workspace', workspaceId, action, callback)
+  }
+
+  registerSessionFilter(filter: SessionListFilter): () => void {
+    if (this.sessionFilters.has(filter.id)) {
+      throw new Error(`uiWorkspace.registerSessionFilter: duplicate filter id ${filter.id}`)
+    }
+    // Subscribe before registering: a throwing subscribe leaves nothing registered.
+    const unsubscribe = filter.subscribe(() => {
+      if (this.sessionFilters.get(filter.id) === filter) this.publishListFilter()
+    })
+    this.sessionFilters.set(filter.id, filter)
+    this.publishListFilter()
+    return () => {
+      if (this.sessionFilters.get(filter.id) !== filter) return
+      this.sessionFilters.delete(filter.id)
+      unsubscribe()
+      this.publishListFilter()
+    }
+  }
+
+  private publishListFilter(): void {
+    const filters = [...this.sessionFilters.values()]
+    this.listFilter.set(filters.length === 0 ? ALL_SESSIONS : {
+      session: summary => filters.every(filter => filter.session(summary)),
+      workspace: workspace => filters.every(filter => filter.workspace?.(workspace) !== false),
+    })
   }
 
   private watchNavigation(): () => void {

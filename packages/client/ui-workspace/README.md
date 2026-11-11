@@ -97,6 +97,8 @@ The first-use directory name and its stored title are fixed, so neither follows 
 
 The package injects the Client `remoteAccess` service and provides the root standard Hook `useWorkspaceAccess(workspaceId, action)`, which answers whether the current Peer may call `action` on one Workspace resource, and `ctx.uiWorkspace.whenAccess(workspaceId, action, callback)`, which keeps the callback's effects installed while that answer is true, with the semantics of `ctx.remoteAccess.whenAccess`; snapshot semantics belong to [`dsh-api-remote-access`](../../api/remote-access/README.md#client-face).
 
+Plugins can narrow the sidebar Session list with `ctx.uiWorkspace.registerSessionFilter(filter)` inside `ctx.effect()`; the call returns the disposer. A `SessionListFilter` has a stable `id`, a `session(summary)` predicate over the Session list's `SessionSummary`, an optional `workspace(view)` predicate over the displayed `WorkspaceView`, and `subscribe(listener)`, which returns an unsubscribe function. Registering a second filter with an existing `id` throws. Filters intersect after the built-in blank, subagent, and archived rules: `session` hides top-level rows in the grouped, flat, and search views, and `workspace` hides a group header with all of its rows in the grouped view, without moving those Sessions to Ungrouped. A group whose rows `session` hides stays visible with a zero count. Filters change visibility only; saved orders, pins, archives, and the current selection are unchanged. When a filter's listener fires or its disposer runs, the browser derives its rows again. With no filter registered, the list is unchanged.
+
 <a id="understand-the-implementation"></a>
 ## Understand the implementation
 

@@ -2,6 +2,8 @@
  * Sidebar slot contract: the registrant-side props composition for the
  * layout-owned `sidebar` slot, plus the holes this shell declares. The shell
  * owns column geometry, the brand row, New Session, and global panel rows;
+ * optional working-mode controls in `sidebar.mode` sit between the brand row
+ * and New Session;
  * everything between the workspace section header and the list bottom is the
  * `sidebar.workspaces` registrant's (ui-workspace), and the foot is the
  * `sidebar.settings` registrant's (ui-settings), followed by optional footer
@@ -40,6 +42,14 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
      * package's `sidebar` entry; the shell supplies a generic text fallback.
      */
     'sidebar.brand.name': { kind: 'single'; scope: 'root'; owner: SidebarBrandNameOwnerProps }
+    /**
+     * Compact controls that switch the application's working mode, between
+     * the brand row and New Session. Declared by this package's `sidebar`
+     * entry; entries render in ascending `order` as column items (the slot
+     * wrapper is `display: contents`), so each entry owns its spacing. The
+     * shell renders nothing for the seat while the list has no registrations.
+     */
+    'sidebar.mode': { kind: 'list'; scope: 'root'; owner: SidebarModeOwnerProps }
     /**
      * Global panel icons. Each list id addresses the matching main panel;
      * the sidebar owns the button and resolves its label from list metadata.
@@ -86,6 +96,12 @@ export interface SidebarBrandMarkOwnerProps {
 export interface SidebarBrandNameOwnerProps {
   /** Marker field: the occupant owns its own content and width. */
   children?: never
+}
+
+/** Owner share of a working-mode control above New Session. */
+export interface SidebarModeOwnerProps {
+  /** Whether the sidebar renders wide content (false = 56px rail). */
+  wide: boolean
 }
 
 /** Icon presentation supplied by the global panel row. */
@@ -220,6 +236,8 @@ export type SidebarRootInjected = {
     entryPins: ObservableSnapshot<readonly string[]>
     /** Whether `sidebar.panellist.actions` has registrations. */
     entryActions: ObservableSnapshot<boolean>
+    /** Whether `sidebar.mode` has registrations. */
+    modes: ObservableSnapshot<boolean>
   }
 }
 
@@ -234,6 +252,7 @@ export type SidebarRootComponentProps =
     | 'sidebar.brand.mark'
     | 'sidebar.brand.name'
     | 'sidebar.toggle.badge'
+    | 'sidebar.mode'
     | 'sidebar.panellist.actions'
     | 'sidebar.workspaces'
     | 'sidebar.settings'

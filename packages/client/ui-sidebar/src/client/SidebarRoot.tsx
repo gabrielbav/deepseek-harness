@@ -1,5 +1,7 @@
 /**
  * Sidebar shell: column geometry and global panel navigation.
+ * Working-mode controls (`sidebar.mode`) render between the brand row and
+ * New Session only while that list has registrations.
  * Collapse is a slide plus crossfade:
  * content freezes at its expanded width (inline style) and fades out in place
  * while the sliding column (AppFrame grid tracks) clips it — nothing reflows
@@ -161,6 +163,7 @@ export function SidebarRoot({
   usePanels,
   useEntryPins,
   useEntryActions,
+  useModes,
   useShortcuts,
   usePanelInfo,
   t,
@@ -171,6 +174,7 @@ export function SidebarRoot({
   const unpinned = useEntryPins(ids => ids)
   const activePanelId = usePanelInfo(info => info.activePanelId)
   const hasEntryActions = useEntryActions(registered => registered)
+  const hasModes = useModes(registered => registered)
   const shortcut = useShortcuts(rows => rows.find(row => row.id === 'sidebar.left.toggle'))
   const newShortcut = useShortcuts(rows => rows.find(row => row.id === 'session.new'))
   // A page whose access snapshot excludes starting a Session offers no New Session affordance.
@@ -377,6 +381,8 @@ export function SidebarRoot({
         })()}
         {!darwinDesktop && toggle}
       </div>
+
+      {hasModes && renderSlot('sidebar.mode', { wide })}
 
       {/* The label fades before the hover/focus shortcut, including on translucent backgrounds. */}
       {canStartSession && (

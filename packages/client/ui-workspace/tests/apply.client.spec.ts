@@ -276,6 +276,34 @@ describe('ui-workspace apply', () => {
     expect(dispose).toHaveBeenCalledOnce()
   })
 
+  it('removes a plugin\'s Session-list filter from the browser when that plugin unloads', async () => {
+    const b = await bench()
+    onTestFinished(() => b.ctx.fiber.dispose())
+    declare(b.slots, 'sidebar.workspaces')
+    await b.ctx.plugin({ inject: [...inject], apply }).await()
+    const browser = faceOf(b.slots.entries('sidebar.workspaces')[0]!) as WorkspaceBrowserInjected
+    const predicate = browser.hooks.sessionListFilter
+    const accepting = predicate.getSnapshot()
+    expect(accepting.session(summary('code', 1))).toBe(true)
+    const changed = vi.fn()
+    predicate.subscribe(changed)
+    const unsubscribe = vi.fn()
+    const caller = b.ctx.plugin({
+      inject: ['uiWorkspace'],
+      apply: (callerCtx: Context) => {
+        callerCtx.effect(() => callerCtx.uiWorkspace.registerSessionFilter({
+          id: 'mode', session: row => row.id !== sid('code'), subscribe: () => unsubscribe,
+        }))
+      },
+    })
+    await caller.await()
+    expect(predicate.getSnapshot().session(summary('code', 1))).toBe(false)
+    await caller.dispose()
+    expect(unsubscribe).toHaveBeenCalledOnce()
+    expect(predicate.getSnapshot()).toBe(accepting)
+    expect(changed).toHaveBeenCalledTimes(2)
+  })
+
   it('reports a default Workspace creation failure through the shared notice overlay', async () => {
     const b = await bench()
     onTestFinished(() => b.ctx.fiber.dispose())
