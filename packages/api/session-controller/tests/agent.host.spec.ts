@@ -263,3 +263,99 @@ describe('ApiSession creation', () => {
       .rejects.toThrow('failed to ensure project directory')
   })
 })
+
+describe('ApiSession Agent release', () => {
+  /** Resume `meta` through a recorded handle whose disposer unregisters the published Agent. */
+  async function resumable(ctx: Context, meta: SessionHeader) {
+    providePersistence(ctx, {
+      list: () => Promise.resolve([meta]),
+      inspect: () => Promise.resolve({ meta, events: [] }),
+    })
+    const live = agent(ctx, meta)
+    let unregister: () => Promise<void> | void = () => undefined
+    const dispose = vi.fn(async () => { await unregister() })
+    vi.spyOn(ctx.agents, 'resume').mockImplementation(async () => {
+      unregister = await ctx.agents.register(live)
+      return { agent: live, dispose }
+    })
+    return { live, dispose }
+  }
+
+  it('waits for an in-flight resume, then disposes the resumed Agent', async () => {
+    const { ctx, agents } = await harness()
+    const meta = header('release-after-resume')
+    providePersistence(ctx, {
+      list: () => Promise.resolve([meta]),
+      inspect: () => Promise.resolve({ meta, events: [] }),
+    })
+    const live = agent(ctx, meta)
+    const gate = Promise.withResolvers<undefined>()
+    const dispose = vi.fn(() => Promise.resolve())
+    vi.spyOn(ctx.agents, 'resume').mockImplementation(async () => {
+      await gate.promise
+      await ctx.agents.register(live)
+      return { agent: live, dispose }
+    })
+    const resolving = agents.resolveAgent(meta.id)
+    const releasing = agents.releaseAgent(meta.id)
+    gate.resolve(undefined)
+    await expect(resolving).resolves.toEqual({ agent: live })
+    await expect(releasing).resolves.toEqual({ released: true })
+    expect(dispose).toHaveBeenCalledOnce()
+  })
+
+  it('treats a failed in-flight resume as nothing to release', async () => {
+    const { ctx, agents } = await harness()
+    const meta = header('release-failed-resume')
+    providePersistence(ctx, {
+      list: () => Promise.resolve([meta]),
+      inspect: () => Promise.resolve({ meta, events: [] }),
+    })
+    vi.spyOn(ctx.agents, 'resume').mockRejectedValue(new Error('factory unavailable'))
+    const resolving = agents.resolveAgent(meta.id)
+    await expect(agents.releaseAgent(meta.id)).resolves.toEqual({ released: false, reason: 'not-loaded' })
+    await expect(resolving).resolves.toMatchObject({ error: { code: 'gateway/internal' } })
+  })
+
+  it('keeps an Agent that starts running or is disposed while activity is queried', async () => {
+    const running = await harness()
+    const runningMeta = header('release-starts-running')
+    const { live, dispose } = await resumable(running.ctx, runningMeta)
+    await running.agents.resolveAgent(runningMeta.id)
+    running.ctx.on('workspace/session-activity', async (_request, next) => {
+      Object.assign(live, { status: 'running' })
+      return next()
+    })
+    await expect(running.agents.releaseAgent(runningMeta.id))
+      .resolves.toEqual({ released: false, reason: 'active', activity: [{ kind: 'turn' }] })
+    expect(dispose).not.toHaveBeenCalled()
+
+    const gone = await harness()
+    const goneMeta = header('release-disposed-during-query')
+    const handle = await resumable(gone.ctx, goneMeta)
+    await gone.agents.resolveAgent(goneMeta.id)
+    gone.ctx.on('workspace/session-activity', async (_request, next) => {
+      await handle.dispose()
+      return next()
+    })
+    await expect(gone.agents.releaseAgent(goneMeta.id)).resolves.toEqual({ released: false, reason: 'not-loaded' })
+    expect(handle.dispose).toHaveBeenCalledOnce()
+  })
+
+  it('forgets a disposer once its own Agent is disposed, and only then', async () => {
+    const { ctx, agents } = await harness()
+    const meta = header('release-forgotten')
+    const { live, dispose } = await resumable(ctx, meta)
+    await agents.resolveAgent(meta.id)
+    ctx.emit('agent/disposed', { agent: { ...live } })
+    ctx.emit('agent/disposed', { agent: agent(ctx, header('release-never-owned')) })
+    await expect(agents.releaseAgent(meta.id)).resolves.toEqual({ released: true })
+    expect(dispose).toHaveBeenCalledOnce()
+
+    const replacement = agent(ctx, header('release-forgotten-2'))
+    agents.retain({ agent: replacement, dispose: () => Promise.resolve() })
+    ctx.emit('agent/disposed', { agent: replacement })
+    await ctx.agents.register(replacement)
+    await expect(agents.releaseAgent(replacement.id)).resolves.toEqual({ released: false, reason: 'not-owned' })
+  })
+})

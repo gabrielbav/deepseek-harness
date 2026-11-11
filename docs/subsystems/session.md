@@ -886,6 +886,19 @@ Host service backing the generated `ctx.remote.session` namespace.
 resolveAgent(sessionId: SessionId): Promise<ApiSessionAgentResult>
 
 /**
+ * Dispose the idle Agent of one Session this controller created or resumed,
+ * releasing its memory and writer lock while the stored log stays unchanged.
+ * The Session stays listed: Clients receive the cold `api-session/added`
+ * summary the Agent disposal publishes, never `api-session/removed`, and the
+ * next request that needs the Agent resumes it. A Session whose Agent is
+ * running, has reported work, or belongs to another owner keeps its Agent.
+ * Host-only: no Remote endpoint exposes this method.
+ * @param sessionId - Session whose Agent is released.
+ * @returns whether the Agent was disposed, or why it was kept.
+ */
+async releaseAgent(sessionId: SessionId): Promise<ApiSessionReleaseResult>
+
+/**
  * Read all visible Session rows without resuming an Agent.
  * @param _request - reserved empty list request.
  * @param signal - cancellation for persistence reads and summary generation.

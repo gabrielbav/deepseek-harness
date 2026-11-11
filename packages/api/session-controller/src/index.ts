@@ -9,7 +9,7 @@ import z from '@deepseek-ai/schemastery'
 import { errorChain, ReasoningEffortId, type MessageSource } from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-client-file-upload'
 import { canOpenNativePath, nativeFileManager, nativeFileApplications, openNativeFileApplication, openNativeAssociatedPath, revealNativePath } from '@deepseek-ai/dsh-native-command'
-import type { SessionId } from '@deepseek-ai/dsh-session'
+import type { Session, SessionId } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-session-projection-cache'
 import type { SessionObservation } from '@deepseek-ai/dsh-session-query'
 import { Remote, RemoteError, TypertRemoteService, principalOf, type TypertResourceResolveInput } from '@deepseek-ai/dsh-typert-protocol'
@@ -19,6 +19,7 @@ import type {} from '@deepseek-ai/dsh-api-remote-access'
 import {
   ApiSessionAgentController,
   type ApiSessionAgentResult,
+  type ApiSessionReleaseResult,
 } from './agent.ts'
 import { SessionCommandController, hasPromptContent } from './commands.ts'
 import { SessionControlController } from './control.ts'
@@ -68,6 +69,7 @@ import type {
 
 export type * from './types.ts'
 export { ApiSessionNotFound } from './agent.ts'
+export type { ApiSessionReleaseResult } from './agent.ts'
 export { SessionFileReferences } from './file-references.ts'
 export { SessionSkillCatalog } from './skill-catalog.ts'
 
@@ -169,6 +171,8 @@ export class SessionController extends TypertRemoteService {
   private readonly canOpenPath: () => boolean
   private readonly listWorkSliceMs: number
   private readonly promotions = new Set<Promise<void>>()
+  /** Sessions whose Agent {@link SessionController.releaseAgent} is disposing; their disposal is not a removal. */
+  private readonly releasing = new Set<Session>()
 
   /**
    * @param ctx - Host context containing the Session capability assembly.
@@ -225,7 +229,7 @@ export class SessionController extends TypertRemoteService {
       ctx.emit('api-session/added', this.listState.summaryFor(session))
     })
     ctx.on('session/disposed', (session) => {
-      ctx.emit('api-session/removed', session.id)
+      if (!this.releasing.has(session)) ctx.emit('api-session/removed', session.id)
     })
     const publishAgentAvailability = ({ agent }: { agent: Agent }): undefined => {
       if (ctx.sessions.get(agent.id) === agent.session) {
@@ -270,6 +274,29 @@ export class SessionController extends TypertRemoteService {
    */
   resolveAgent(sessionId: SessionId): Promise<ApiSessionAgentResult> {
     return this.agents.resolveAgent(sessionId)
+  }
+
+  /**
+   * Dispose the idle Agent of one Session this controller created or resumed,
+   * releasing its memory and writer lock while the stored log stays unchanged.
+   * The Session stays listed: Clients receive the cold `api-session/added`
+   * summary the Agent disposal publishes, never `api-session/removed`, and the
+   * next request that needs the Agent resumes it. A Session whose Agent is
+   * running, has reported work, or belongs to another owner keeps its Agent.
+   * Host-only: no Remote endpoint exposes this method.
+   * @param sessionId - Session whose Agent is released.
+   * @returns whether the Agent was disposed, or why it was kept.
+   */
+  async releaseAgent(sessionId: SessionId): Promise<ApiSessionReleaseResult> {
+    let session: Session | undefined
+    try {
+      return await this.agents.releaseAgent(sessionId, (agent) => {
+        session = agent.session
+        this.releasing.add(session)
+      })
+    } finally {
+      if (session !== undefined) this.releasing.delete(session)
+    }
   }
 
   /**

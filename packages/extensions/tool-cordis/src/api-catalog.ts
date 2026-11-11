@@ -2901,6 +2901,12 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         returns: 'the live Agent or the stable Session-domain failure.',
       },
       {
+        signature: 'async releaseAgent(sessionId: SessionId): Promise<ApiSessionReleaseResult>',
+        description: 'Dispose the idle Agent of one Session this controller created or resumed, releasing its memory and writer lock while the stored log stays unchanged. The Session stays listed: Clients receive the cold `api-session/added` summary the Agent disposal publishes, never `api-session/removed`, and the next request that needs the Agent resumes it. A Session whose Agent is running, has reported work, or belongs to another owner keeps its Agent. Host-only: no Remote endpoint exposes this method.',
+        parameters: [{ name: 'sessionId', description: 'Session whose Agent is released.' }],
+        returns: 'whether the Agent was disposed, or why it was kept.',
+      },
+      {
         signature: '@Remote(\'list\') async list(_request: SessionListRequest, signal: AbortSignal): Promise<SessionListValue>',
         description: 'Read all visible Session rows without resuming an Agent.',
         parameters: [{ name: '_request', description: 'reserved empty list request.' }, { name: 'signal', description: 'cancellation for persistence reads and summary generation.' }],
@@ -5920,6 +5926,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'ApiSessionAgentResult',
     declaration: 'export type ApiSessionAgentResult = {\n    readonly agent: Agent;\n} | {\n    readonly error: ApiSessionAgentError;\n};',
+  },
+  {
+    name: 'ApiSessionReleaseResult',
+    declaration: 'export type ApiSessionReleaseResult = {\n    readonly released: true;\n} | {\n    readonly released: false;\n    readonly reason: \'not-loaded\' | \'not-owned\';\n} | {\n    readonly released: false;\n    readonly reason: \'active\';\n    readonly activity: readonly SessionActivity[];\n};',
   },
   {
     name: 'ApprovalOutcome',
