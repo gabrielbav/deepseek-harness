@@ -507,6 +507,7 @@ export const LINK_MAP: Readonly<Record<string, string>> = {
   MessageFeedbackVersionConflict: 'feedback.md',
   UserMessage: 'session.md',
   ApiSessionAgentResult: 'session.md',
+  ApiSessionReleaseResult: 'session.md',
   PreStepDecision: 'core.md',
   PreStepContext: 'core.md',
   RequestErrorAction: 'core.md',

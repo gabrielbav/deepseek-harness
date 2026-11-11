@@ -3,7 +3,7 @@
 import { randomUUID } from 'node:crypto'
 import { mkdir } from 'node:fs/promises'
 import type { Context } from '@deepseek-ai/cordis'
-import type { Agent, AgentOptions, AgentSetup } from '@deepseek-ai/dsh-agent'
+import type { Agent, AgentHandle, AgentOptions, AgentSetup } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
 import { installModelSelection } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-preset-registry'
@@ -12,6 +12,7 @@ import type { Session, SessionId } from '@deepseek-ai/dsh-session'
 import { SessionQueryError, type SessionObservation } from '@deepseek-ai/dsh-session-query'
 import { RemoteError, remoteErrorOf } from '@deepseek-ai/dsh-typert-protocol'
 import type {} from '@deepseek-ai/dsh-typert-registry'
+import type { SessionActivity } from '@deepseek-ai/dsh-workspace'
 
 /** Cold Session identity absent from persistence. */
 export class ApiSessionNotFound extends Error {}
@@ -91,6 +92,19 @@ export type ApiSessionAgentResult =
   | { readonly error: ApiSessionAgentError }
 
 /**
+ * Outcome of one {@link ApiSessionAgentController.releaseAgent} request.
+ * `not-loaded`: no Agent is live for the Session. `not-owned`: the live Agent
+ * was created by another owner (a subagent manager, ACP, the SDK server, a
+ * webhook), so only that owner can dispose it. `active`: the Session still
+ * runs work, listed in `activity` as the `workspace/session-activity`
+ * providers reported it, or its Agent is running a turn.
+ */
+export type ApiSessionReleaseResult =
+  | { readonly released: true }
+  | { readonly released: false; readonly reason: 'not-loaded' | 'not-owned' }
+  | { readonly released: false; readonly reason: 'active'; readonly activity: readonly SessionActivity[] }
+
+/**
  * Test whether generic Session routing must leave an identity to subagent routing.
  * @param session - Attached or live Session whose origin is tested.
  * @returns whether subagent routing owns the Session identity.
@@ -117,15 +131,21 @@ export class ApiSessionAgentController {
   private readonly resumes = new Map<SessionId, Promise<Agent>>()
   private readonly claims = new Map<SessionId, Promise<void>>()
   private readonly imageAdmissionChains = new WeakMap<Agent, Promise<void>>()
+  /** Disposers of the live Agents this controller created or resumed, by Session. */
+  private readonly handles = new Map<SessionId, AgentHandle>()
 
   /** @param ctx - Host context carrying Agent, model, persistence, and Typert services. */
   constructor(private readonly ctx: Context) {}
 
   /**
-   * Configure Session and Agent lookups for Typert.
+   * Configure Session and Agent lookups for Typert, and forget the disposer of
+   * every owned Agent once that Agent is disposed by any path.
    */
   initialize(): void {
     const ctx = this.ctx
+    ctx.on('agent/disposed', ({ agent }) => {
+      if (this.handles.get(agent.id)?.agent === agent) this.handles.delete(agent.id)
+    })
     ctx.typert.lookups.configure('agent', async (sessionId: SessionId) => {
       const found = await this.resolveAgent(sessionId)
       if ('error' in found) throw found.error
@@ -233,6 +253,52 @@ export class ApiSessionAgentController {
   }
 
   /**
+   * Dispose the idle Agent of one Session this controller created or resumed,
+   * so the Session leaves the live store and its writer lock is released. The
+   * stored log is unchanged and a later request resumes the Session as usual.
+   * Requests for one identity run in the order of creation requests for it,
+   * and an in-flight resume settles before the check. The Session is refused
+   * while its Agent runs a turn or a `workspace/session-activity` provider
+   * reports work; the running state is read again synchronously before
+   * disposal starts, so a turn that begins during the provider query keeps
+   * the Agent live.
+   * @param sessionId - Session whose Agent is released.
+   * @param beforeDispose - called synchronously with the Agent right before disposal starts.
+   * @returns whether the Agent was disposed, or why it was kept.
+   */
+  async releaseAgent(
+    sessionId: SessionId,
+    beforeDispose?: (agent: Agent) => void,
+  ): Promise<ApiSessionReleaseResult> {
+    return this.inOrder(sessionId, async () => {
+      await this.resumes.get(sessionId)?.catch(() => undefined)
+      const agent = this.ctx.agents.get(sessionId)
+      if (agent === undefined) return { released: false, reason: 'not-loaded' }
+      const handle = this.handles.get(sessionId)
+      if (handle?.agent !== agent) return { released: false, reason: 'not-owned' }
+      const activity = await this.ctx.waterfall(
+        'workspace/session-activity', { sessionId }, () => Promise.resolve([]),
+      )
+      if (activity.length > 0) return { released: false, reason: 'active', activity }
+      if (this.ctx.agents.get(sessionId) !== agent) return { released: false, reason: 'not-loaded' }
+      if (agent.status === 'running') return { released: false, reason: 'active', activity: [{ kind: 'turn' }] }
+      beforeDispose?.(agent)
+      await handle.dispose()
+      return { released: true }
+    })
+  }
+
+  /**
+   * Record the disposer of an Agent this controller created or resumed.
+   * @param handle - owned Agent and its disposer.
+   * @returns the handle's Agent.
+   */
+  retain(handle: AgentHandle): Agent {
+    this.handles.set(handle.agent.id, handle)
+    return handle.agent
+  }
+
+  /**
    * Read the current Agent preset from the Session projection.
    * @param session - live Session whose projection state is available.
    * @returns the current preset, or undefined without a preset service or recorded selection.
@@ -310,11 +376,11 @@ export class ApiSessionAgentController {
     if (published !== undefined && hasApiSessionSubagentOwner(published)) {
       throw new ApiSessionSubagentOwnership(sessionId)
     }
-    return (await this.ctx.agents.resume({
+    return this.retain(await this.ctx.agents.resume({
       resumeSessionId: sessionId,
       agentOptions: this.agentOptions(),
       setup: composition.setup,
-    })).agent
+    }))
   }
 
   private async inOrder<Value>(sessionId: SessionId, operation: () => Promise<Value>): Promise<Value> {
@@ -364,11 +430,11 @@ export class ApiSessionAgentController {
     if (!reusable) return this.createMinted(request.cwd, composition)
     this.assertPresetApplicable(sessionId, request.agentPreset)
     try {
-      return (await this.ctx.agents.resume({
+      return this.retain(await this.ctx.agents.resume({
         resumeSessionId: sessionId,
         agentOptions: this.agentOptions(),
         setup: this.reuseSetup(composition),
-      })).agent
+      }))
     } catch (error: unknown) {
       if (error instanceof ApiSessionStartedSinceObserved) return this.createMinted(request.cwd, composition)
       if (!(error instanceof Error) || error.name !== 'SessionAlreadyOwnedError') throw error
@@ -439,7 +505,7 @@ export class ApiSessionAgentController {
     } catch (error: unknown) {
       throw new Error(`failed to ensure project directory "${cwd}": ${String(error)}`, { cause: error })
     }
-    return (await this.ctx.agents.create({
+    return this.retain(await this.ctx.agents.create({
       sessionId,
       agentOptions: this.agentOptions(),
       meta: {
@@ -447,7 +513,7 @@ export class ApiSessionAgentController {
         ...(composition.agentPreset === undefined ? {} : { agentPreset: composition.agentPreset }),
       },
       setup: composition.setup,
-    })).agent
+    }))
   }
 
   private agentOptions(): AgentOptions {
