@@ -19,7 +19,7 @@ import { zh as commonZh } from '@deepseek-ai/dsh-client-locale/src/locales/zh.ts
 import type { DirectoryFlowOwnerProps, WorkspaceActionRequest, WorkspaceBrowserProps } from '../src/client/contract/slots.ts'
 import { createWorkspaceShortcutControls } from '../src/client/shortcuts.ts'
 import { createWorkspaceViewStore, FLAT_SESSION_ORDER_KEY } from '../src/client/stores.ts'
-import { UNGROUPED_KEY } from '../src/client/tree.ts'
+import { ALL_SESSIONS, type SessionListPredicate, UNGROUPED_KEY } from '../src/client/tree.ts'
 import { WorkspaceBrowser } from '../src/client/rows/WorkspaceBrowser.tsx'
 import { renderMenuButton } from './menu-button.tsx'
 import rowCss from '../src/client/rows/Rows.module.css'
@@ -152,6 +152,7 @@ function mount(overrides: Partial<WorkspaceBrowserProps> = {}) {
     createWorkspace: vi.fn(async () => workspace('created', [])),
     useDirectoryFlow: bindSnapshotSelector({ getSnapshot: () => true, subscribe: () => () => {} }),
     useHostInfo: selector => selector({ home: undefined, isLoopback: true }),
+    useSessionListFilter: selector => selector(ALL_SESSIONS),
     renderSlot: renderDirectoryFlowOnly,
     renderFactorySlot: renderMenuButton,
     t,
@@ -1318,6 +1319,41 @@ describe('WorkspaceBrowser', () => {
     expect(notifyArchivedNotOpenable).toHaveBeenCalledOnce()
     expect(row.getAttribute('aria-description')).toBe('已归档对话暂时无法查看，请取消归档后查看')
     expect((input as HTMLInputElement).value).toBe('gone')
+  })
+
+  it('follows the registered Session-list filter in the grouped, flat, and search views', async () => {
+    const accepting: SessionListPredicate = { session: () => true, workspace: () => true }
+    const filter = createSnapshotStore(accepting)
+    const b = mount({
+      useSessions: hook(sessionState([summary('chat-row', 3), summary('code-row', 2)])),
+      useWorkspaces: hook(workspaceState([workspace('chat', ['chat-row']), workspace('code', ['code-row'])])),
+      useSessionListFilter: bindSnapshotSelector(filter),
+    })
+    act(() => {
+      b.store.actions.setGroupExpanded('chat', true)
+      b.store.actions.setGroupExpanded('code', true)
+    })
+    expect(screen.getByText('code-row')).toBeTruthy()
+    act(() => {
+      filter.set({
+        session: row => row.id !== sid('code-row'),
+        workspace: view => view.workspaceId !== wid('code'),
+      })
+    })
+    expect(screen.queryByText('code-row')).toBeNull()
+    expect(screen.queryByText('code')).toBeNull()
+    expect(screen.getByText('chat-row')).toBeTruthy()
+    act(() => { b.store.actions.setGroupBy('flat') })
+    expect(screen.queryByText('code-row')).toBeNull()
+    expect(screen.getByText('chat-row')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: '搜索会话' }))
+    fireEvent.change(screen.getByPlaceholderText('搜索会话名称'), { target: { value: 'row' } })
+    await act(async () => { await Promise.resolve() })
+    const tree = screen.getByRole('tree', { name: '搜索结果' })
+    expect(within(tree).getByText('chat-row')).toBeTruthy()
+    expect(within(tree).queryByText('code-row')).toBeNull()
+    act(() => { filter.set(accepting) })
+    expect(within(screen.getByRole('tree', { name: '搜索结果' })).getByText('code-row')).toBeTruthy()
   })
 
   it('offers unarchive on archived search results only', async () => {

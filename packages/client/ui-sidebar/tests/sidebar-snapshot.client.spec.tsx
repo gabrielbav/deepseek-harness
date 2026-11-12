@@ -16,6 +16,7 @@ import { LocaleRuntime } from '@deepseek-ai/dsh-client-locale/client'
 import { en as commonEn } from '@deepseek-ai/dsh-client-locale/src/locales/en.ts'
 import { zh as commonZh } from '@deepseek-ai/dsh-client-locale/src/locales/zh.ts'
 import { apply, inject } from '@deepseek-ai/dsh-client-ui-sidebar/client'
+import type { SidebarModeOwnerProps } from '@deepseek-ai/dsh-client-ui-sidebar/client'
 
 // The service reads its initial locale from the browser; these specs assert
 // the shipped Chinese copy, so they state the browser they assume.
@@ -112,5 +113,35 @@ describe('sidebar shell snapshots', () => {
       await runtime.dispose()
       document.documentElement.removeAttribute('data-windows-titlebar')
     }
+  })
+})
+
+describe('sidebar working-mode seat', () => {
+  it('renders mode entries in order between the brand row and New Session, and nothing once they leave', async () => {
+    const { runtime } = await bench({ locale: 'en' })
+    const Mode = ({ wide, label }: SidebarModeOwnerProps & { readonly label: string }) =>
+      <span data-testid="mode-entry" data-wide={String(wide)}>{label}</span>
+    const modes = await runtime.mount({ inject: ['slots'], apply(ctx) {
+      ctx.slots.inject('sidebar.mode', function* () {
+        yield ctx.slots.register({ name: 'sidebar.mode', id: 'second', order: 20 }, props => <Mode {...props} label="Second" />)
+        yield ctx.slots.register({ name: 'sidebar.mode', id: 'first', order: 10 }, props => <Mode {...props} label="First" />)
+      })
+    } })
+    const slot = runtime.renderSlot('sidebar', { collapsed: false, width: 300, drawer: false })
+    const shell = slot.container.firstElementChild!
+    const entries = slot.view.getAllByTestId('mode-entry')
+    expect(entries.map(entry => [entry.textContent, entry.dataset.wide])).toEqual([['First', 'true'], ['Second', 'true']])
+    // The seat follows the brand row and precedes New Session in the column.
+    const children = [...shell.children]
+    const logoRow = children.findIndex(child => child.hasAttribute('data-window-drag'))
+    const seat = children[logoRow + 1]!
+    expect(seat.getAttribute('data-slot')).toBe('sidebar.mode')
+    expect(entries.every(entry => seat.contains(entry))).toBe(true)
+    expect(children[logoRow + 2]?.getAttribute('aria-label')).toBe('New session')
+    await act(async () => { await modes.dispose() })
+    expect(slot.view.queryAllByTestId('mode-entry')).toHaveLength(0)
+    expect(shell.querySelector('[data-slot="sidebar.mode"]')).toBeNull()
+    expect(shell.children[logoRow + 1]?.getAttribute('aria-label')).toBe('New session')
+    await runtime.dispose()
   })
 })

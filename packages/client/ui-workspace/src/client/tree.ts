@@ -221,26 +221,63 @@ export function pinCurrentBlank(
 export type ArchivedFilter = 'default' | 'show' | 'only'
 
 /**
+ * Plugin-contributed Session-list visibility, applied after the built-in
+ * blank, subagent, and archived rules. It hides rows only; ordering
+ * membership and accounting slots stay unchanged.
+ */
+export interface SessionListPredicate {
+  /**
+   * Decide whether one top-level Session row is visible.
+   * @param summary - Session metadata from the Session list snapshot.
+   * @returns false to hide the row in grouped, flat, and search views.
+   */
+  session(summary: SessionSummary): boolean
+  /**
+   * Decide whether one Workspace group is visible in the grouped view.
+   * @param workspace - Workspace as the browser displays it.
+   * @returns false to hide the group header and all of its rows.
+   */
+  workspace(workspace: WorkspaceView): boolean
+}
+
+/** Predicate that hides nothing: the Session list without plugin filters. */
+export const ALL_SESSIONS: SessionListPredicate = {
+  session: () => true,
+  workspace: () => true,
+}
+
+/**
  * Ordinary sessions are visible; among blank sessions, only the current one
  * is visible. Subagent children use their parent header catalog; archived
  * sessions follow the archived filter, while their accounting slots remain
- * either way so unarchiving restores position.
+ * either way so unarchiving restores position. Rows that pass those rules
+ * remain visible only when the list filter accepts them.
  */
 function sessionVisible(
   session: SessionSummary,
   current: SessionId | undefined,
   archived: ReadonlySet<SessionId>,
   archivedFilter: ArchivedFilter,
+  listFilter: SessionListPredicate,
 ): boolean {
   if (session.origin === 'subagent') return false
   if (session.blank && session.id !== current) return false
+  if (!archivedVisible(session.id, archived, archivedFilter)) return false
+  return listFilter.session(session)
+}
+
+function archivedVisible(
+  sessionId: SessionId,
+  archived: ReadonlySet<SessionId>,
+  archivedFilter: ArchivedFilter,
+): boolean {
   switch (archivedFilter) {
     case 'default':
-      return !archived.has(session.id)
+      return !archived.has(sessionId)
     case 'show':
       return true
     case 'only':
-      return archived.has(session.id)
+      return archived.has(sessionId)
     /* v8 ignore next 2 -- closed-union backstop; only reached if the filter is forged */
     default:
       return assertNever(archivedFilter)
@@ -255,6 +292,8 @@ export interface SessionRowState {
   archivedSessionIds: readonly SessionId[]
   /** Archived-row visibility choice applied to lists and search alike. */
   archivedFilter: ArchivedFilter
+  /** Plugin-contributed row and group visibility; {@link ALL_SESSIONS} hides nothing. */
+  listFilter: SessionListPredicate
 }
 
 /**
@@ -327,6 +366,7 @@ function groupByWorkspace(
   workspaces: readonly WorkspaceView[],
   archived: ReadonlySet<SessionId>,
   archivedFilter: ArchivedFilter,
+  listFilter: SessionListPredicate,
   ungroupedOrder: readonly string[] | undefined,
 ): Group[] {
   const current = mainSessionId(list)
@@ -334,13 +374,16 @@ function groupByWorkspace(
   const accounted = new Set<SessionId>()
   for (const workspace of workspaces) {
     const members: SessionSummary[] = []
+    // A hidden Workspace still accounts for its members, so they never fall into Ungrouped.
+    const shown = listFilter.workspace(workspace)
     for (const id of workspace.sessionIds) {
       const summary = list.byId[id]
       if (summary === undefined) continue // account may lead the list pull; the row appears when the summary lands
       accounted.add(id)
-      if (!sessionVisible(summary, current, archived, archivedFilter)) continue
+      if (!shown || !sessionVisible(summary, current, archived, archivedFilter, listFilter)) continue
       members.push(summary)
     }
+    if (!shown) continue
     // The archived-only view lists archives, not the Workspace inventory, so
     // a Workspace without archived Sessions contributes no group.
     if (archivedFilter === 'only' && members.length === 0) continue
@@ -352,7 +395,7 @@ function groupByWorkspace(
   const stray = list.ids
     .map(id => list.byId[id])
     .filter((s): s is SessionSummary =>
-      s !== undefined && !accounted.has(s.id) && sessionVisible(s, current, archived, archivedFilter))
+      s !== undefined && !accounted.has(s.id) && sessionVisible(s, current, archived, archivedFilter, listFilter))
   if (stray.length > 0) {
     groups.push(buildGroup(
       UNGROUPED_KEY,
@@ -418,9 +461,11 @@ function sessionNode(
  * excluded except for the selected provisional New Session row; archived
  * sessions keep their slots and appear per the archived filter. Content
  * search lives outside this derivation (see {@link deriveSearchResults}).
+ * The row state's list filter hides rows and whole Workspace groups; a
+ * hidden Workspace's members never move to Ungrouped.
  * @param list - sessions list snapshot (`mainView` retention feeds containsCurrent).
  * @param workspaces - real Workspaces in Host group order with caller-projected Session order.
- * @param rowState - registry-global pin and archive sets plus the archived filter.
+ * @param rowState - registry-global pin and archive sets, the archived filter, and the list filter.
  * @param statuses - unified UI status by Session.
  * @param view - local expansion arrays.
  * @returns group sections in render order.
@@ -440,7 +485,9 @@ export function deriveGroups(
     ? undefined
     : owningGroupKey(workspaces, current)
   const groups: GroupNode[] = []
-  for (const g of groupByWorkspace(list, workspaces, archived, rowState.archivedFilter, view.ungroupedOrder)) {
+  for (const g of groupByWorkspace(
+    list, workspaces, archived, rowState.archivedFilter, rowState.listFilter, view.ungroupedOrder,
+  )) {
     const expanded = expandedGroups.has(g.key)
     groups.push({
       key: g.key,
@@ -466,7 +513,7 @@ export function deriveGroups(
  * @returns known ordinary Session ids, including archives and only the current blank.
  */
 export function sessionMemberIds(list: SessionListState): SessionId[] {
-  return visibleSessionIds(list, [], 'show')
+  return visibleSessionIds(list, [], 'show', ALL_SESSIONS)
 }
 
 /**
@@ -474,18 +521,20 @@ export function sessionMemberIds(list: SessionListState): SessionId[] {
  * @param list - sessions list snapshot.
  * @param archivedSessionIds - registry-global archive set.
  * @param archivedFilter - archived-row visibility choice.
+ * @param listFilter - plugin-contributed row visibility.
  * @returns known visible Session ids in list order, including ordinary forks and only the current blank.
  */
 export function visibleSessionIds(
   list: SessionListState,
   archivedSessionIds: readonly SessionId[],
   archivedFilter: ArchivedFilter,
+  listFilter: SessionListPredicate,
 ): SessionId[] {
   const archived = new Set(archivedSessionIds)
   const current = mainSessionId(list)
   return list.ids.filter((id) => {
     const s = list.byId[id]
-    return s !== undefined && sessionVisible(s, current, archived, archivedFilter)
+    return s !== undefined && sessionVisible(s, current, archived, archivedFilter, listFilter)
   })
 }
 
@@ -494,7 +543,7 @@ export function visibleSessionIds(
  * pinned rows fronted ahead of the supplied order.
  * @param list - sessions list snapshot used to select the ids.
  * @param sessionIds - complete account members in the selected order, including hidden archives.
- * @param rowState - registry-global pin and archive sets plus the archived filter.
+ * @param rowState - registry-global pin and archive sets, the archived filter, and the list filter (rows only).
  * @param statuses - unified UI status by Session.
  * @returns flat rows in sectioned order with current status indicators.
  */
@@ -509,7 +558,8 @@ export function deriveFlat(
   const current = mainSessionId(list)
   const members = sessionIds.flatMap((id) => {
     const session = list.byId[id]
-    return session !== undefined && sessionVisible(session, current, archived, rowState.archivedFilter)
+    return session !== undefined
+      && sessionVisible(session, current, archived, rowState.archivedFilter, rowState.listFilter)
       ? [session]
       : []
   })
@@ -526,6 +576,7 @@ export function deriveFlat(
  * @param query - caller text; surrounding whitespace is ignored.
  * @param archivedSessionIds - registry-global archive set (members match per the archived filter).
  * @param archivedFilter - archived-row visibility choice; search follows it.
+ * @param listFilter - plugin-contributed row visibility; search follows its Session rule.
  * @param statuses - unified UI status by Session.
  * @param content - ranked Host content-search page.
  * @param limit - protocol-owned maximum merged row count.
@@ -537,6 +588,7 @@ export function deriveSearchResults(
   query: string,
   archivedSessionIds: readonly SessionId[],
   archivedFilter: ArchivedFilter,
+  listFilter: SessionListPredicate,
   statuses: SessionStatuses,
   content: { items: readonly SessionSearchResultItem[]; hasMore: boolean },
   limit: number,
@@ -564,7 +616,8 @@ export function deriveSearchResults(
     const summary = list.byId[id]
     // Blank placeholders never match a query (their canonical title displays
     // localized, so matching it would tie search to one language).
-    if (summary === undefined || summary.blank || !sessionVisible(summary, current, archived, archivedFilter)) continue
+    if (summary === undefined || summary.blank
+      || !sessionVisible(summary, current, archived, archivedFilter, listFilter)) continue
     if (
       sessionTitle(summary).toLowerCase().includes(q)
       || labelOf(summary).toLowerCase().includes(q)
@@ -587,7 +640,8 @@ export function deriveSearchResults(
   for (const summary of orderedLocal) include(summary)
   for (const item of content.items) {
     const summary = list.byId[item.sessionId]
-    if (summary !== undefined && !summary.blank && sessionVisible(summary, current, archived, archivedFilter)) include(summary)
+    if (summary !== undefined && !summary.blank
+      && sessionVisible(summary, current, archived, archivedFilter, listFilter)) include(summary)
   }
 
   return {

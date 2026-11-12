@@ -1568,3 +1568,97 @@ describe('UiWorkspaceService', () => {
     })
   })
 })
+
+describe('UiWorkspaceService Session-list filters', () => {
+  /** A filter whose answers change on demand; `notify` fires its subscribers. */
+  function toggleFilter(id: string, hidden: Set<string>, hiddenWorkspaces?: Set<string>) {
+    const listeners = new Set<() => void>()
+    const unsubscribe = vi.fn((listener: () => void) => { listeners.delete(listener) })
+    return {
+      filter: {
+        id,
+        session: (row: SessionSummary) => !hidden.has(row.id),
+        ...hiddenWorkspaces === undefined ? {} : {
+          workspace: (view: WorkspaceView) => !hiddenWorkspaces.has(view.workspaceId),
+        },
+        subscribe: (listener: () => void) => {
+          listeners.add(listener)
+          return () => { unsubscribe(listener) }
+        },
+      },
+      notify: () => { for (const listener of [...listeners]) listener() },
+      listeners,
+      unsubscribe,
+    }
+  }
+
+  it('accepts everything until a filter registers and intersects every registered filter', () => {
+    const { uiWorkspace } = bench()
+    const predicate = uiWorkspace.sessionListPredicate
+    const empty = predicate.getSnapshot()
+    expect(empty.session(summary('a'))).toBe(true)
+    expect(empty.workspace(workspace('w'))).toBe(true)
+    const first = toggleFilter('first', new Set(['a']))
+    const second = toggleFilter('second', new Set(['b']), new Set(['hidden']))
+    const disposeFirst = uiWorkspace.registerSessionFilter(first.filter)
+    const disposeSecond = uiWorkspace.registerSessionFilter(second.filter)
+    const both = predicate.getSnapshot()
+    expect(['a', 'b', 'c'].map(id => both.session(summary(id)))).toEqual([false, false, true])
+    // A filter without a Workspace rule accepts every group.
+    expect([both.workspace(workspace('hidden')), both.workspace(workspace('shown'))]).toEqual([false, true])
+    disposeSecond()
+    disposeFirst()
+    expect(predicate.getSnapshot()).toBe(empty)
+  })
+
+  it('republishes when a registered filter notifies and stops listening after disposal', () => {
+    const { uiWorkspace } = bench()
+    const predicate = uiWorkspace.sessionListPredicate
+    const hidden = new Set<string>()
+    const mode = toggleFilter('mode', hidden)
+    const dispose = uiWorkspace.registerSessionFilter(mode.filter)
+    const changed = vi.fn()
+    predicate.subscribe(changed)
+    const before = predicate.getSnapshot()
+    hidden.add('a')
+    mode.notify()
+    expect(changed).toHaveBeenCalledOnce()
+    expect(predicate.getSnapshot()).not.toBe(before)
+    expect(predicate.getSnapshot().session(summary('a'))).toBe(false)
+    const retained = [...mode.listeners]
+    dispose()
+    expect(mode.unsubscribe).toHaveBeenCalledOnce()
+    expect(predicate.getSnapshot().session(summary('a'))).toBe(true)
+    // A listener the filter kept after unsubscribing, and a repeated disposal, publish nothing.
+    changed.mockClear()
+    for (const listener of retained) listener()
+    dispose()
+    expect(changed).not.toHaveBeenCalled()
+    expect(mode.unsubscribe).toHaveBeenCalledOnce()
+  })
+
+  it('rejects a duplicate id and keeps the filter already registered under it', () => {
+    const { uiWorkspace } = bench()
+    const first = toggleFilter('mode', new Set(['a']))
+    uiWorkspace.registerSessionFilter(first.filter)
+    const second = toggleFilter('mode', new Set(['b']))
+    expect(() => uiWorkspace.registerSessionFilter(second.filter)).toThrow(/duplicate filter id mode/)
+    expect(second.listeners.size).toBe(0)
+    const predicate = uiWorkspace.sessionListPredicate.getSnapshot()
+    expect([predicate.session(summary('a')), predicate.session(summary('b'))]).toEqual([false, true])
+  })
+
+  it('leaves nothing registered when a filter fails to subscribe', () => {
+    const { uiWorkspace } = bench()
+    const failing = {
+      id: 'mode',
+      session: () => false,
+      subscribe: () => { throw new Error('subscribe failed') },
+    }
+    expect(() => uiWorkspace.registerSessionFilter(failing)).toThrow('subscribe failed')
+    expect(uiWorkspace.sessionListPredicate.getSnapshot().session(summary('a'))).toBe(true)
+    const retry = toggleFilter('mode', new Set(['a']))
+    uiWorkspace.registerSessionFilter(retry.filter)
+    expect(uiWorkspace.sessionListPredicate.getSnapshot().session(summary('a'))).toBe(false)
+  })
+})
