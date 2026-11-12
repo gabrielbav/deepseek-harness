@@ -2072,6 +2072,17 @@ describe('PluginManagerPage', () => {
     expect(screen.queryByText(other)).toBeNull()
   })
 
+  it('heads a gate refusal by its ruling, not as a failed install', () => {
+    const subject = { spec: 'dsh-a@1.0.0', status: 'accepted', kind: 'registry', bundle: true, registry: null } as const
+    const report = { digest: 'd1', spec: 'dsh-a@1.0.0', level: 'review', score: 59, reasons: [], findings: [], omittedFindings: 0, gates: ['g'], checkedAt: '2026-01-01T00:00:00.000Z' } as const
+    const { set } = renderTab({
+      install: { ...IDLE_INSTALL, open: true, spec: 'dsh-a@1.0.0', phase: 'failed', subject, gateReport: report, failure: { reason: '', code: 'gate-review' } },
+    })
+    expect(screen.getByRole('alert').textContent).toBe(en.installGateReviewTitle)
+    set({ install: { ...IDLE_INSTALL, open: true, spec: 'dsh-a@1.0.0', phase: 'failed', subject, gateReport: { ...report, level: 'block' }, failure: { reason: '', code: 'gate-blocked' } } })
+    expect(screen.getByRole('alert').textContent).toBe(en.installGateBlockedTitle)
+  })
+
   it('words a failed install by its kind, else in the Host\'s words, and retries it', () => {
     const subject = { spec: 'github:a/b', status: 'accepted', kind: 'git', bundle: null, registry: null, host: 'github.com' } as const
     const { actions, set } = renderTab({

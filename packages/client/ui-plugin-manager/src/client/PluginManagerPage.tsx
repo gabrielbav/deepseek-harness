@@ -1355,7 +1355,6 @@ function InstallDialog({
       </Modal>
     )
   }
-  const heading = t(phase === 'done' && install.subject?.bundled ? 'installBundledTitle' : SCREEN_TITLE_KEYS[phase])
   const pending = isInstallPending(phase)
   // A settled screen whose install never reported a run can say the details received no terminal output.
   const settledDetails = phase === 'failed' || phase === 'done' || phase === 'unknown'
@@ -1374,6 +1373,11 @@ function InstallDialog({
     : phase === 'failed' && failure?.code === 'gate-review' ? 'review' as const
       : phase === 'failed' && failure?.code === 'gate-blocked' ? 'blocked' as const
         : null
+  // A gate refusal is not a failed install: review waits for the person, blocked is the gate's ruling.
+  const heading = t(phase === 'done' && install.subject?.bundled ? 'installBundledTitle'
+    : gateOutcome === 'review' ? 'installGateReviewTitle'
+      : gateOutcome === 'blocked' ? 'installGateBlockedTitle'
+        : SCREEN_TITLE_KEYS[phase])
   const approvable = pendingBuilds.length > 0
   const firstRun = install.runs[0]
   // The registries the Host asked, once there is more than one: the attempt under way while it runs, a badge on each run.
